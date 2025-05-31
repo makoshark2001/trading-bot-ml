@@ -1,0 +1,46 @@
+{
+  "name": "trading-bot-ml",
+  "version": "1.0.0",
+  "description": "Machine Learning service for Advanced Trading Bot - LSTM Predictions & AI Analysis",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/makoshark2001/trading-bot-ml"
+  },
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "dev": "nodemon src/main.js",
+    "train": "node scripts/train-models.js",
+    "test:data": "node scripts/test-data-client.js",
+    "test:features": "node scripts/test-feature-extraction.js",
+    "test:models": "node scripts/test-lstm-model.js",
+    "test:all": "npm run test:data && npm run test:features && npm run test:models"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs": "^4.22.0",
+    "@tensorflow/tfjs-backend-cpu": "^4.22.0",
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "config": "^3.3.9",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "keywords": [
+    "trading",
+    "bot",
+    "machine-learning",
+    "lstm",
+    "tensorflow",
+    "predictions",
+    "ai"
+  ],
+  "author": "HTMauney",
+  "license": "ISC",
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  }
+}
