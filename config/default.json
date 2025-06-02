@@ -21,6 +21,13 @@
         "batchSize": 32,
         "validationSplit": 0.2
       }
+    },
+    "storage": {
+      "baseDir": "data/ml",
+      "saveInterval": 300000,
+      "maxAgeHours": 168,
+      "enableCache": true,
+      "autoCleanup": true
     }
   },
   "server": {
