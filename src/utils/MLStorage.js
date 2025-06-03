@@ -1,11 +1,11 @@
 const fs = require('fs');
 const path = require('path');
-const { Logger } = require('./Logger'); // Direct import from Logger file
 
 class MLStorage {
     constructor(config = {}) {
         this.baseDir = config.baseDir || path.join(process.cwd(), 'data', 'ml');
         this.modelsDir = path.join(this.baseDir, 'models');
+        this.weightsDir = path.join(this.baseDir, 'weights');
         this.trainingDir = path.join(this.baseDir, 'training');
         this.predictionsDir = path.join(this.baseDir, 'predictions');
         this.featuresDir = path.join(this.baseDir, 'features');
@@ -19,19 +19,28 @@ class MLStorage {
         this.predictionCache = new Map();
         this.featureCache = new Map();
         this.trainingHistory = new Map();
+        this.weightsCache = new Map();
         
         this.initializeDirectories();
         this.startPeriodicSave();
         
-        console.log('MLStorage initialized with config:', {
+        console.log('Enhanced MLStorage initialized with weight persistence', {
             baseDir: this.baseDir,
             enableCache: this.enableCache,
-            saveInterval: this.saveInterval
+            saveInterval: this.saveInterval,
+            weightPersistence: true
         });
     }
     
     initializeDirectories() {
-        const dirs = [this.baseDir, this.modelsDir, this.trainingDir, this.predictionsDir, this.featuresDir];
+        const dirs = [
+            this.baseDir, 
+            this.modelsDir, 
+            this.weightsDir,
+            this.trainingDir, 
+            this.predictionsDir, 
+            this.featuresDir
+        ];
         
         dirs.forEach(dir => {
             if (!fs.existsSync(dir)) {
@@ -172,6 +181,189 @@ class MLStorage {
         }
         
         return data;
+    }
+    
+    // NEW: Weight persistence methods
+    async saveModelWeights(pair, modelType, model) {
+        try {
+            const weightsDir = path.join(this.weightsDir, `${pair.toLowerCase()}_${modelType}`);
+            
+            // Create weights directory if it doesn't exist
+            if (!fs.existsSync(weightsDir)) {
+                fs.mkdirSync(weightsDir, { recursive: true });
+            }
+            
+            // Save model weights
+            await model.save(`file://${weightsDir}`);
+            
+            // Save metadata
+            const metadata = {
+                pair: pair.toUpperCase(),
+                modelType: modelType,
+                savedAt: Date.now(),
+                modelSummary: model.getModelSummary(),
+                version: '1.0.0',
+                type: 'model_weights'
+            };
+            
+            const metadataPath = path.join(weightsDir, 'metadata.json');
+            await this.writeFileAtomic(metadataPath, metadata);
+            
+            // Cache weights info
+            const cacheKey = `${pair.toUpperCase()}_${modelType}`;
+            this.weightsCache.set(cacheKey, {
+                hasWeights: true,
+                savedAt: Date.now(),
+                weightsDir: weightsDir
+            });
+            
+            console.log(`Model weights saved for ${pair}:${modelType}`, {
+                weightsDir: weightsDir,
+                modelParams: metadata.modelSummary.totalParams
+            });
+            
+            return weightsDir;
+            
+        } catch (error) {
+            console.error(`Failed to save model weights for ${pair}:${modelType}`, { 
+                error: error.message 
+            });
+            throw error;
+        }
+    }
+    
+    async loadModelWeights(pair, modelType, ModelClass, config) {
+        try {
+            const weightsDir = path.join(this.weightsDir, `${pair.toLowerCase()}_${modelType}`);
+            const modelJsonPath = path.join(weightsDir, 'model.json');
+            const metadataPath = path.join(weightsDir, 'metadata.json');
+            
+            // Check if weights exist
+            if (!fs.existsSync(modelJsonPath) || !fs.existsSync(metadataPath)) {
+                console.log(`No trained weights found for ${pair}:${modelType}`);
+                return null;
+            }
+            
+            // Load metadata to verify compatibility
+            const metadata = this.readFileSecure(metadataPath);
+            if (!metadata) {
+                console.warn(`Invalid metadata for ${pair}:${modelType} weights`);
+                return null;
+            }
+            
+            // Check feature count compatibility
+            if (metadata.modelSummary && metadata.modelSummary.config) {
+                const savedFeatureCount = metadata.modelSummary.config.features;
+                const currentFeatureCount = config.features;
+                
+                if (savedFeatureCount !== currentFeatureCount) {
+                    console.warn(`Feature count mismatch for ${pair}:${modelType}. Saved: ${savedFeatureCount}, Current: ${currentFeatureCount}. Cannot load weights.`);
+                    return null;
+                }
+            }
+            
+            // Load the model with weights
+            const tf = require('@tensorflow/tfjs');
+            const loadedModel = await tf.loadLayersModel(`file://${weightsDir}/model.json`);
+            
+            // Create wrapper with correct class
+            const modelWrapper = new ModelClass(config);
+            modelWrapper.model = loadedModel;
+            modelWrapper.isCompiled = true;
+            
+            // Cache weights info
+            const cacheKey = `${pair.toUpperCase()}_${modelType}`;
+            this.weightsCache.set(cacheKey, {
+                hasWeights: true,
+                loadedAt: Date.now(),
+                weightsDir: weightsDir,
+                metadata: metadata
+            });
+            
+            console.log(`Model weights loaded for ${pair}:${modelType}`, {
+                weightsDir: weightsDir,
+                savedAt: new Date(metadata.savedAt).toLocaleString(),
+                modelParams: metadata.modelSummary.totalParams
+            });
+            
+            return modelWrapper;
+            
+        } catch (error) {
+            console.error(`Failed to load model weights for ${pair}:${modelType}`, { 
+                error: error.message 
+            });
+            return null;
+        }
+    }
+    
+    hasTrainedWeights(pair, modelType) {
+        const cacheKey = `${pair.toUpperCase()}_${modelType}`;
+        
+        // Check cache first
+        if (this.weightsCache.has(cacheKey)) {
+            return this.weightsCache.get(cacheKey).hasWeights;
+        }
+        
+        // Check filesystem
+        const weightsDir = path.join(this.weightsDir, `${pair.toLowerCase()}_${modelType}`);
+        const modelJsonPath = path.join(weightsDir, 'model.json');
+        const metadataPath = path.join(weightsDir, 'metadata.json');
+        
+        const hasWeights = fs.existsSync(modelJsonPath) && fs.existsSync(metadataPath);
+        
+        // Cache result
+        this.weightsCache.set(cacheKey, {
+            hasWeights: hasWeights,
+            checkedAt: Date.now(),
+            weightsDir: weightsDir
+        });
+        
+        return hasWeights;
+    }
+    
+    // NEW: Get list of all trained models
+    getTrainedModelsList() {
+        try {
+            const trainedModels = [];
+            
+            if (!fs.existsSync(this.weightsDir)) {
+                return trainedModels;
+            }
+            
+            const weightDirs = fs.readdirSync(this.weightsDir);
+            
+            for (const dir of weightDirs) {
+                const dirPath = path.join(this.weightsDir, dir);
+                const metadataPath = path.join(dirPath, 'metadata.json');
+                
+                if (fs.existsSync(metadataPath)) {
+                    try {
+                        const metadata = this.readFileSecure(metadataPath);
+                        if (metadata) {
+                            trainedModels.push({
+                                pair: metadata.pair,
+                                modelType: metadata.modelType,
+                                savedAt: metadata.savedAt,
+                                modelParams: metadata.modelSummary?.totalParams || 0,
+                                featureCount: metadata.modelSummary?.config?.features || 0,
+                                weightsDir: dir
+                            });
+                        }
+                    } catch (error) {
+                        console.warn(`Failed to read metadata for ${dir}:`, error.message);
+                    }
+                }
+            }
+            
+            // Sort by saved date (newest first)
+            trainedModels.sort((a, b) => b.savedAt - a.savedAt);
+            
+            return trainedModels;
+            
+        } catch (error) {
+            console.error('Failed to get trained models list', { error: error.message });
+            return [];
+        }
     }
     
     // Training history persistence
@@ -320,20 +512,24 @@ class MLStorage {
     getStorageStats() {
         const stats = {
             models: this.getDirectoryStats(this.modelsDir),
+            weights: this.getDirectoryStats(this.weightsDir),
             training: this.getDirectoryStats(this.trainingDir),
             predictions: this.getDirectoryStats(this.predictionsDir),
             features: this.getDirectoryStats(this.featuresDir),
             cache: {
                 models: this.modelCache.size,
+                weights: this.weightsCache.size,
                 training: this.trainingHistory.size,
                 predictions: this.predictionCache.size,
                 features: this.featureCache.size
             },
             totalSizeBytes: 0,
+            trainedModels: this.getTrainedModelsList(),
             timestamp: Date.now()
         };
         
         stats.totalSizeBytes = stats.models.sizeBytes + 
+                              stats.weights.sizeBytes +
                               stats.training.sizeBytes + 
                               stats.predictions.sizeBytes + 
                               stats.features.sizeBytes;
@@ -353,19 +549,32 @@ class MLStorage {
                 return stats;
             }
             
-            const files = fs.readdirSync(directory);
+            const items = fs.readdirSync(directory);
             
-            files.forEach(file => {
-                if (file.endsWith('.json') && !file.endsWith('.tmp') && !file.endsWith('.backup')) {
-                    const filePath = path.join(directory, file);
-                    const fileStat = fs.statSync(filePath);
-                    
+            items.forEach(item => {
+                const itemPath = path.join(directory, item);
+                const itemStat = fs.statSync(itemPath);
+                
+                if (itemStat.isFile() && (item.endsWith('.json') || item.endsWith('.bin'))) {
                     stats.count++;
-                    stats.sizeBytes += fileStat.size;
+                    stats.sizeBytes += itemStat.size;
                     stats.files.push({
-                        name: file,
-                        sizeBytes: fileStat.size,
-                        lastModified: fileStat.mtime.toISOString()
+                        name: item,
+                        sizeBytes: itemStat.size,
+                        lastModified: itemStat.mtime.toISOString()
+                    });
+                } else if (itemStat.isDirectory()) {
+                    // For directories (like weights), count contents
+                    const dirStats = this.getDirectoryStats(itemPath);
+                    stats.count += dirStats.count;
+                    stats.sizeBytes += dirStats.sizeBytes;
+                    // Add directory entry
+                    stats.files.push({
+                        name: item,
+                        type: 'directory',
+                        sizeBytes: dirStats.sizeBytes,
+                        lastModified: itemStat.mtime.toISOString(),
+                        contents: dirStats.count
                     });
                 }
             });
@@ -511,6 +720,7 @@ class MLStorage {
         this.predictionCache.clear();
         this.featureCache.clear();
         this.trainingHistory.clear();
+        this.weightsCache.clear();
         
         console.log('ML Storage shutdown completed');
     }
