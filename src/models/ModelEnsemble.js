@@ -89,19 +89,33 @@ class ModelEnsemble {
                 const prediction = await modelInfo.model.predict(inputX);
                 const predictionTime = Date.now() - startTime;
                 
-                // Convert tensor to array if needed
-                let predictionArray;
-                if (prediction.data) {
-                    predictionArray = await prediction.data();
+                // Handle tensor or array predictions properly
+                let predictionValue;
+                if (prediction && typeof prediction.data === 'function') {
+                    // It's a tensor
+                    const predictionArray = await prediction.data();
+                    predictionValue = predictionArray[0];
                     prediction.dispose();
+                } else if (Array.isArray(prediction)) {
+                    // It's already an array
+                    predictionValue = prediction[0];
+                } else if (typeof prediction === 'number') {
+                    // It's a single number
+                    predictionValue = prediction;
                 } else {
-                    predictionArray = Array.isArray(prediction) ? prediction : [prediction];
+                    // Try to extract from different formats
+                    predictionValue = prediction[0] || prediction;
                 }
                 
-                predictions.set(modelType, predictionArray[0]);
+                // Ensure we have a valid number
+                if (typeof predictionValue !== 'number' || isNaN(predictionValue)) {
+                    throw new Error(`Invalid prediction value: ${predictionValue}`);
+                }
+                
+                predictions.set(modelType, predictionValue);
                 
                 // Calculate confidence based on distance from 0.5
-                const confidence = Math.abs(predictionArray[0] - 0.5) * 2;
+                const confidence = Math.abs(predictionValue - 0.5) * 2;
                 confidences.set(modelType, confidence);
                 
                 // Update model statistics
@@ -110,7 +124,7 @@ class ModelEnsemble {
                 modelInfo.metadata.lastPrediction = Date.now();
                 modelInfo.metadata.lastPredictionTime = predictionTime;
                 
-                Logger.debug(`${modelType} prediction: ${predictionArray[0].toFixed(4)}, confidence: ${confidence.toFixed(4)}`);
+                Logger.debug(`${modelType} prediction: ${predictionValue.toFixed(4)}, confidence: ${confidence.toFixed(4)}`);
                 
             } catch (error) {
                 Logger.error(`Prediction failed for ${modelType}`, { error: error.message });
@@ -123,9 +137,7 @@ class ModelEnsemble {
         }
         
         // Combine predictions using voting strategy
-        const ensemblePrediction = this.combinePredicti
-
-ons(predictions, confidences, options);
+        const ensemblePrediction = this.combinePredictions(predictions, confidences, options);
         
         // Update performance tracking
         this.updatePerformanceTracking(predictions, confidences, ensemblePrediction);
@@ -136,7 +148,7 @@ ons(predictions, confidences, options);
             direction: ensemblePrediction.value > 0.5 ? 'up' : 'down',
             signal: this.getTradeSignal(ensemblePrediction.value, ensemblePrediction.confidence),
             ensemble: {
-                strategy: this.votingStrategy,
+                strategy: ensemblePrediction.strategy || this.votingStrategy,
                 modelCount: predictions.size,
                 individualPredictions: Object.fromEntries(predictions),
                 individualConfidences: Object.fromEntries(confidences),
@@ -152,9 +164,7 @@ ons(predictions, confidences, options);
     }
     
     // Combine predictions using different strategies
-    combinePredicti
-
-ons(predictions, confidences, options = {}) {
+    combinePredictions(predictions, confidences, options = {}) {
         const strategy = options.strategy || this.votingStrategy;
         
         switch (strategy) {

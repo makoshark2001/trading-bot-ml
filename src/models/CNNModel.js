@@ -47,55 +47,55 @@ class CNNModel {
             
             this.model = tf.sequential();
             
-            // Input layer - reshape for 1D convolution
-            this.model.add(tf.layers.reshape({
-                inputShape: [this.sequenceLength, this.features],
-                targetShape: [this.sequenceLength, this.features, 1]
-            }));
-            
+            // Use 1D convolution for time series data
             // First Convolutional Block
-            this.model.add(tf.layers.conv2d({
+            this.model.add(tf.layers.conv1d({
                 filters: this.filters[0],
-                kernelSize: [this.kernelSizes[0], 1],
+                kernelSize: this.kernelSizes[0],
                 activation: 'relu',
                 padding: 'same',
+                inputShape: [this.sequenceLength, this.features],
                 kernelInitializer: 'heNormal'
             }));
             
-            this.model.add(tf.layers.maxPooling2d({
-                poolSize: [this.poolSizes[0], 1],
+            this.model.add(tf.layers.maxPooling1d({
+                poolSize: this.poolSizes[0],
                 padding: 'same'
             }));
             
             this.model.add(tf.layers.dropout({ rate: this.dropout }));
             
-            // Second Convolutional Block  
-            this.model.add(tf.layers.conv2d({
-                filters: this.filters[1],
-                kernelSize: [this.kernelSizes[1], 1],
-                activation: 'relu',
-                padding: 'same',
-                kernelInitializer: 'heNormal'
-            }));
+            // Second Convolutional Block (if we have enough filters defined)
+            if (this.filters.length > 1) {
+                this.model.add(tf.layers.conv1d({
+                    filters: this.filters[1],
+                    kernelSize: this.kernelSizes[1] || this.kernelSizes[0],
+                    activation: 'relu',
+                    padding: 'same',
+                    kernelInitializer: 'heNormal'
+                }));
+                
+                this.model.add(tf.layers.maxPooling1d({
+                    poolSize: this.poolSizes[1] || this.poolSizes[0],
+                    padding: 'same'
+                }));
+                
+                this.model.add(tf.layers.dropout({ rate: this.dropout }));
+            }
             
-            this.model.add(tf.layers.maxPooling2d({
-                poolSize: [this.poolSizes[1], 1],
-                padding: 'same'
-            }));
+            // Third Convolutional Block (if we have enough filters defined)
+            if (this.filters.length > 2) {
+                this.model.add(tf.layers.conv1d({
+                    filters: this.filters[2],
+                    kernelSize: this.kernelSizes[2] || this.kernelSizes[0],
+                    activation: 'relu',
+                    padding: 'same',
+                    kernelInitializer: 'heNormal'
+                }));
+            }
             
-            this.model.add(tf.layers.dropout({ rate: this.dropout }));
-            
-            // Third Convolutional Block
-            this.model.add(tf.layers.conv2d({
-                filters: this.filters[2],
-                kernelSize: [this.kernelSizes[2], 1],
-                activation: 'relu',
-                padding: 'same',
-                kernelInitializer: 'heNormal'
-            }));
-            
-            // Flatten for dense layers
-            this.model.add(tf.layers.flatten());
+            // Global max pooling to reduce dimensions
+            this.model.add(tf.layers.globalMaxPooling1d());
             
             this.model.add(tf.layers.dropout({ rate: this.dropout }));
             
@@ -108,13 +108,15 @@ class CNNModel {
             
             this.model.add(tf.layers.dropout({ rate: this.dropout }));
             
-            this.model.add(tf.layers.dense({
-                units: this.denseUnits[1],
-                activation: 'relu',
-                kernelInitializer: 'heNormal'
-            }));
-            
-            this.model.add(tf.layers.dropout({ rate: this.dropout / 2 }));
+            if (this.denseUnits.length > 1) {
+                this.model.add(tf.layers.dense({
+                    units: this.denseUnits[1],
+                    activation: 'relu',
+                    kernelInitializer: 'heNormal'
+                }));
+                
+                this.model.add(tf.layers.dropout({ rate: this.dropout / 2 }));
+            }
             
             // Output layer - binary classification
             this.model.add(tf.layers.dense({
@@ -271,8 +273,6 @@ class CNNModel {
                 finalMetrics.bestValLoss = bestValLoss.toFixed(4);
             }
             
-            // Calculate final metrics with only accuracy
-            
             Logger.info('CNN model training completed', finalMetrics);
             
             return {
@@ -359,66 +359,6 @@ class CNNModel {
             
         } catch (error) {
             Logger.error('CNN model evaluation failed', { error: error.message });
-            throw error;
-        }
-    }
-    
-    // Feature importance analysis using gradient-based method
-    async getFeatureImportance(inputX, numSamples = 100) {
-        if (!this.model) {
-            throw new Error('Model must be built before feature importance analysis');
-        }
-        
-        try {
-            Logger.info('Calculating CNN feature importance');
-            
-            // Take a subset of samples for analysis
-            const sampleSize = Math.min(numSamples, inputX.shape[0]);
-            const sampleIndices = Array.from({length: sampleSize}, (_, i) => 
-                Math.floor(Math.random() * inputX.shape[0]));
-            
-            const samples = tf.gather(inputX, sampleIndices);
-            
-            // Calculate gradients with respect to input
-            const gradients = tf.variableGrads(() => {
-                const predictions = this.model.predict(samples);
-                return tf.mean(predictions);
-            }, [samples]);
-            
-            const gradientValues = await gradients.grads[0].data();
-            
-            // Calculate feature importance (average absolute gradient per feature)
-            const importance = new Array(this.features).fill(0);
-            const sequenceLength = this.sequenceLength;
-            
-            for (let i = 0; i < gradientValues.length; i++) {
-                const featureIndex = i % this.features;
-                importance[featureIndex] += Math.abs(gradientValues[i]);
-            }
-            
-            // Normalize importance scores
-            const totalImportance = importance.reduce((sum, val) => sum + val, 0);
-            const normalizedImportance = importance.map(val => 
-                totalImportance > 0 ? val / totalImportance : 0);
-            
-            // Clean up tensors
-            samples.dispose();
-            gradients.grads[0].dispose();
-            
-            Logger.info('CNN feature importance calculated', {
-                totalFeatures: this.features,
-                samplesAnalyzed: sampleSize
-            });
-            
-            return {
-                importance: normalizedImportance,
-                featureCount: this.features,
-                samplesAnalyzed: sampleSize,
-                timestamp: Date.now()
-            };
-            
-        } catch (error) {
-            Logger.error('CNN feature importance calculation failed', { error: error.message });
             throw error;
         }
     }
@@ -543,47 +483,6 @@ class CNNModel {
                 params: layer.countParams()
             }))
         };
-    }
-    
-    // Get pattern recognition insights
-    async analyzePatterns(inputX, topK = 5) {
-        if (!this.model) {
-            throw new Error('Model must be built for pattern analysis');
-        }
-        
-        try {
-            // Get predictions for the input
-            const predictions = await this.predict(inputX);
-            
-            // Analyze confidence distribution
-            const confidences = predictions.map(pred => Math.abs(pred - 0.5) * 2);
-            const avgConfidence = confidences.reduce((sum, conf) => sum + conf, 0) / confidences.length;
-            
-            // Find most confident predictions
-            const indexedPredictions = predictions.map((pred, index) => ({ index, pred, confidence: confidences[index] }));
-            const topPredictions = indexedPredictions
-                .sort((a, b) => b.confidence - a.confidence)
-                .slice(0, topK);
-            
-            return {
-                totalPredictions: predictions.length,
-                averageConfidence: avgConfidence,
-                topPredictions: topPredictions,
-                confidenceDistribution: {
-                    veryHigh: confidences.filter(c => c > 0.8).length,
-                    high: confidences.filter(c => c > 0.6 && c <= 0.8).length,
-                    medium: confidences.filter(c => c > 0.4 && c <= 0.6).length,
-                    low: confidences.filter(c => c > 0.2 && c <= 0.4).length,
-                    veryLow: confidences.filter(c => c <= 0.2).length
-                },
-                modelType: 'CNN',
-                timestamp: Date.now()
-            };
-            
-        } catch (error) {
-            Logger.error('CNN pattern analysis failed', { error: error.message });
-            throw error;
-        }
     }
     
     dispose() {
