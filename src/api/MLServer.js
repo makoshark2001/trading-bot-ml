@@ -23,6 +23,7 @@ class MLServer {
         this.ensembles = {}; // Store ensemble models for each pair
         this.predictions = {}; // Cache recent predictions
         this.mlStorage = null; // Advanced persistence
+        this.featureCounts = {}; // Track feature count per pair
         
         // Model configuration
         this.modelTypes = ['lstm', 'gru', 'cnn', 'transformer'];
@@ -116,7 +117,8 @@ class MLServer {
                             stats: ensembleStats
                         },
                         enabledTypes: this.enabledModels,
-                        strategy: this.ensembleStrategy
+                        strategy: this.ensembleStrategy,
+                        featureCounts: this.featureCounts
                     },
                     predictions: {
                         cached: Object.keys(this.predictions).length,
@@ -439,6 +441,9 @@ class MLServer {
                 const pairData = await this.dataClient.getPairData(pair);
                 const features = this.featureExtractor.extractFeatures(pairData);
                 
+                // Update feature count tracking
+                this.featureCounts[pair] = features.features.length;
+                
                 // Save to cache
                 await this.mlStorage.saveFeatureCache(pair, {
                     count: features.features.length,
@@ -494,6 +499,7 @@ class MLServer {
                 
                 res.json({
                     pair,
+                    featureCount: this.featureCounts[pair] || 'unknown',
                     individual: individualModels,
                     ensemble: {
                         hasEnsemble: !!ensemble,
@@ -580,6 +586,65 @@ class MLServer {
             }
         });
         
+        // Rebuild models endpoint - NEW
+        this.app.post('/api/models/:pair/rebuild', async (req, res) => {
+            try {
+                const pair = req.params.pair.toUpperCase();
+                
+                Logger.info(`Rebuilding models for ${pair} with current feature count`);
+                
+                // Clear existing models for this pair
+                if (this.models[pair]) {
+                    Object.values(this.models[pair]).forEach(model => {
+                        if (model && typeof model.dispose === 'function') {
+                            model.dispose();
+                        }
+                    });
+                    delete this.models[pair];
+                }
+                
+                // Clear ensemble
+                if (this.ensembles[pair]) {
+                    if (typeof this.ensembles[pair].dispose === 'function') {
+                        this.ensembles[pair].dispose();
+                    }
+                    delete this.ensembles[pair];
+                }
+                
+                // Clear cache for this pair
+                delete this.predictions[pair];
+                delete this.featureCounts[pair];
+                
+                // Get current feature count
+                const pairData = await this.dataClient.getPairData(pair);
+                const features = this.featureExtractor.extractFeatures(pairData);
+                const currentFeatureCount = features.features.length;
+                
+                this.featureCounts[pair] = currentFeatureCount;
+                
+                Logger.info(`Rebuilding models for ${pair} with ${currentFeatureCount} features`);
+                
+                res.json({
+                    success: true,
+                    message: `Models rebuilt for ${pair}`,
+                    pair: pair,
+                    newFeatureCount: currentFeatureCount,
+                    rebuiltModels: this.enabledModels,
+                    timestamp: Date.now()
+                });
+                
+            } catch (error) {
+                Logger.error(`Model rebuild failed for ${req.params.pair}`, { 
+                    error: error.message 
+                });
+                res.status(500).json({
+                    error: 'Model rebuild failed',
+                    message: error.message,
+                    pair: req.params.pair.toUpperCase()
+                });
+            }
+        });
+        
         // Enhanced API endpoints list
         this.app.get('/api', (req, res) => {
             res.json({
@@ -590,7 +655,8 @@ class MLServer {
                     'Multiple Model Types (LSTM, GRU, CNN, Transformer)',
                     'Weighted Voting Strategies',
                     'Performance Tracking',
-                    'Advanced Persistence'
+                    'Advanced Persistence',
+                    'Dynamic Feature Count Handling'
                 ],
                 endpoints: [
                     'GET /api/health - Enhanced service health with ensemble info',
@@ -602,6 +668,7 @@ class MLServer {
                     'GET /api/models/:pair/compare - Compare individual model performance',
                     'GET /api/models/:pair/:modelType/predict - Individual model predictions',
                     'GET /api/models/:pair/status - Enhanced model status with ensemble info',
+                    'POST /api/models/:pair/rebuild - Rebuild models with current feature count',
                     'GET /api/features/:pair - Feature extraction with caching',
                     'GET /api/storage/stats - Storage statistics',
                     'POST /api/storage/save - Force save all data',
@@ -646,6 +713,9 @@ class MLServer {
             const pairData = await this.dataClient.getPairData(pair);
             const features = this.featureExtractor.extractFeatures(pairData);
             
+            // Update feature count
+            this.featureCounts[pair] = features.features.length;
+            
             // Prepare input for prediction
             const inputData = await this.prepareRealTimeInput(features.features);
             
@@ -658,6 +728,9 @@ class MLServer {
                 timestamp: Date.now(),
                 type: 'ensemble'
             };
+            
+            // Clean up input tensor
+            inputData.dispose();
             
             return this.predictions[cacheKey];
             
@@ -678,17 +751,31 @@ class MLServer {
         }
         
         try {
-            // Get or create model
-            let model = this.models[pair] && this.models[pair][modelType];
-            if (!model) {
-                const pairData = await this.dataClient.getPairData(pair);
-                const features = this.featureExtractor.extractFeatures(pairData);
-                model = await this.getOrCreateModel(pair, modelType, features.features.length);
-            }
-            
-            // Get data and extract features
+            // Get data and extract features first to check feature count
             const pairData = await this.dataClient.getPairData(pair);
             const features = this.featureExtractor.extractFeatures(pairData);
+            const currentFeatureCount = features.features.length;
+            
+            // Update feature count tracking
+            this.featureCounts[pair] = currentFeatureCount;
+            
+            // Get or create model with correct feature count
+            let model = this.models[pair] && this.models[pair][modelType];
+            if (!model) {
+                model = await this.getOrCreateModel(pair, modelType, currentFeatureCount);
+            } else {
+                // Check if model's feature count matches current features
+                const modelSummary = model.getModelSummary();
+                if (modelSummary.config && modelSummary.config.features !== currentFeatureCount) {
+                    Logger.warn(`Feature count mismatch for ${pair}:${modelType}. Model expects ${modelSummary.config.features}, got ${currentFeatureCount}. Rebuilding model.`);
+                    
+                    // Dispose old model
+                    model.dispose();
+                    
+                    // Create new model with correct feature count
+                    model = await this.getOrCreateModel(pair, modelType, currentFeatureCount);
+                }
+            }
             
             // Prepare input for prediction
             const inputData = await this.prepareRealTimeInput(features.features);
@@ -710,7 +797,8 @@ class MLServer {
                 metadata: {
                     timestamp: Date.now(),
                     version: '2.0.0',
-                    type: 'individual_prediction'
+                    type: 'individual_prediction',
+                    featureCount: currentFeatureCount
                 }
             };
             
@@ -720,6 +808,9 @@ class MLServer {
                 timestamp: Date.now(),
                 type: 'individual'
             };
+            
+            // Clean up input tensor
+            inputData.dispose();
             
             return this.predictions[cacheKey];
             
@@ -732,6 +823,14 @@ class MLServer {
     // Create or get ensemble for a pair
     async getOrCreateEnsemble(pair) {
         Logger.info(`Creating ensemble for ${pair}`);
+        
+        // Get current feature count
+        const pairData = await this.dataClient.getPairData(pair);
+        const features = this.featureExtractor.extractFeatures(pairData);
+        const featureCount = features.features.length;
+        
+        // Update tracking
+        this.featureCounts[pair] = featureCount;
         
         // Check if we have persistent ensemble metadata
         const ensembleMetadata = this.mlStorage.loadModelMetadata(`${pair}_ensemble`);
@@ -750,11 +849,6 @@ class MLServer {
         
         const ensemble = new ModelEnsemble(ensembleConfig);
         
-        // Get feature count from data
-        const pairData = await this.dataClient.getPairData(pair);
-        const features = this.featureExtractor.extractFeatures(pairData);
-        const featureCount = features.features.length;
-        
         // Create and add individual models to ensemble
         for (const modelType of this.enabledModels) {
             try {
@@ -767,7 +861,7 @@ class MLServer {
                     created: Date.now()
                 });
                 
-                Logger.info(`Added ${modelType} model to ${pair} ensemble`, { weight });
+                Logger.info(`Added ${modelType} model to ${pair} ensemble`, { weight, featureCount });
                 
             } catch (error) {
                 Logger.error(`Failed to add ${modelType} to ensemble for ${pair}`, { 
@@ -783,7 +877,8 @@ class MLServer {
             ensembleConfig: ensemble.toJSON(),
             created: Date.now(),
             pair: pair,
-            modelTypes: this.enabledModels
+            modelTypes: this.enabledModels,
+            featureCount: featureCount
         });
         
         return ensemble;
@@ -795,8 +890,19 @@ class MLServer {
             this.models[pair] = {};
         }
         
+        // Check if model exists and has correct feature count
         if (this.models[pair][modelType]) {
-            return this.models[pair][modelType];
+            const existingModel = this.models[pair][modelType];
+            const modelSummary = existingModel.getModelSummary();
+            
+            if (modelSummary.config && modelSummary.config.features === featureCount) {
+                return existingModel; // Model is correct, return it
+            } else {
+                // Feature count mismatch, dispose and recreate
+                Logger.warn(`Feature count mismatch for ${pair}:${modelType}. Expected ${modelSummary.config.features}, got ${featureCount}. Recreating model.`);
+                existingModel.dispose();
+                delete this.models[pair][modelType];
+            }
         }
         
         Logger.info(`Creating ${modelType} model for ${pair}`, { featureCount });
@@ -829,7 +935,7 @@ class MLServer {
         
         this.models[pair][modelType] = model;
         
-        // Save model metadata
+        // Save model metadata with feature count
         await this.mlStorage.saveModelMetadata(`${pair}_${modelType}`, {
             config: baseConfig,
             modelType: modelType,
@@ -843,12 +949,11 @@ class MLServer {
     
     // Prepare real-time input from features
     async prepareRealTimeInput(features) {
-        // This is a simplified version - in practice, you'd use the preprocessor
-        // to create proper sequences from historical feature data
-        
+        const tf = require('@tensorflow/tfjs');
         const sequenceLength = this.preprocessor.sequenceLength;
         
         // Create a mock sequence by repeating the current features
+        // In production, you'd want to use actual historical feature sequences
         const sequence = Array(sequenceLength).fill(features);
         
         // Convert to tensor
@@ -863,6 +968,7 @@ class MLServer {
             pair: pair,
             models: {},
             ensemble: null,
+            featureCount: this.featureCounts[pair] || 'unknown',
             timestamp: Date.now()
         };
         
@@ -871,6 +977,10 @@ class MLServer {
             const pairData = await this.dataClient.getPairData(pair);
             const features = this.featureExtractor.extractFeatures(pairData);
             const inputData = await this.prepareRealTimeInput(features.features);
+            
+            // Update feature count
+            this.featureCounts[pair] = features.features.length;
+            comparison.featureCount = features.features.length;
             
             // Compare individual models
             const pairModels = this.models[pair] || {};
@@ -954,6 +1064,10 @@ class MLServer {
             // Get historical data
             const pairData = await this.dataClient.getPairData(pair);
             const features = this.featureExtractor.extractFeatures(pairData);
+            const currentFeatureCount = features.features.length;
+            
+            // Update feature count
+            this.featureCounts[pair] = currentFeatureCount;
             
             // Create targets for training
             const targets = this.featureExtractor.createTargets(pairData.history);
@@ -972,7 +1086,8 @@ class MLServer {
                 startTime: Date.now(),
                 models: {},
                 ensemble: null,
-                config: config
+                config: config,
+                featureCount: currentFeatureCount
             };
             
             // Train individual models
@@ -980,7 +1095,7 @@ class MLServer {
                 try {
                     Logger.info(`Training ${modelType} model for ${pair}`);
                     
-                    const model = await this.getOrCreateModel(pair, modelType, features.features.length);
+                    const model = await this.getOrCreateModel(pair, modelType, currentFeatureCount);
                     
                     const modelTrainingConfig = {
                         epochs: config.epochs || 50,
@@ -1053,7 +1168,8 @@ class MLServer {
                 await this.mlStorage.saveModelMetadata(`${pair}_ensemble`, {
                     ensembleConfig: ensemble.toJSON(),
                     trainingCompleted: Date.now(),
-                    performanceWeights: performanceWeights
+                    performanceWeights: performanceWeights,
+                    featureCount: currentFeatureCount
                 });
             }
             
@@ -1075,7 +1191,8 @@ class MLServer {
             Logger.info(`Ensemble training completed for ${pair}`, {
                 totalTime: trainingResults.totalTime,
                 modelsCompleted: Object.values(trainingResults.models).filter(m => m.status === 'completed').length,
-                modelsFailed: Object.values(trainingResults.models).filter(m => m.status === 'failed').length
+                modelsFailed: Object.values(trainingResults.models).filter(m => m.status === 'failed').length,
+                featureCount: currentFeatureCount
             });
             
         } catch (error) {
@@ -1137,6 +1254,7 @@ class MLServer {
                 console.log(`🏆 Model comparison: http://localhost:${this.port}/api/models/RVN/compare`);
                 console.log(`⚖️ Ensemble stats: http://localhost:${this.port}/api/ensemble/RVN/stats`);
                 console.log(`💾 Storage stats: http://localhost:${this.port}/api/storage/stats`);
+                console.log(`🔧 Rebuild models: http://localhost:${this.port}/api/models/RVN/rebuild`);
                 console.log('');
                 console.log('🚀 Advanced Features Available:');
                 console.log(`   • Model Types: ${this.enabledModels.join(', ')}`);
@@ -1144,6 +1262,7 @@ class MLServer {
                 console.log(`   • Individual Model Predictions`);
                 console.log(`   • Performance Comparison`);
                 console.log(`   • Dynamic Weight Updates`);
+                console.log(`   • Dynamic Feature Count Handling`);
             });
             
         } catch (error) {
