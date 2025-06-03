@@ -1,0 +1,632 @@
+const tf = require('@tensorflow/tfjs');
+require('@tensorflow/tfjs-backend-cpu');
+const { Logger } = require('../utils');
+
+class CNNModel {
+    constructor(config = {}) {
+        this.sequenceLength = config.sequenceLength || 60;
+        this.features = config.features || 50;
+        this.filters = config.filters || [32, 64, 128]; // Filter sizes for conv layers
+        this.kernelSizes = config.kernelSizes || [3, 3, 3]; // Kernel sizes for conv layers
+        this.poolSizes = config.poolSizes || [2, 2, 2]; // Pool sizes
+        this.denseUnits = config.denseUnits || [128, 64]; // Dense layer units
+        this.dropout = config.dropout || 0.3;
+        this.learningRate = config.learningRate || 0.001;
+        this.l2Regularization = config.l2Regularization || 0.001;
+        
+        this.model = null;
+        this.isCompiled = false;
+        this.isTraining = false;
+        
+        this.initializeTensorFlow();
+        
+        Logger.info('CNNModel initialized', {
+            sequenceLength: this.sequenceLength,
+            features: this.features,
+            filters: this.filters,
+            kernelSizes: this.kernelSizes,
+            denseUnits: this.denseUnits
+        });
+    }
+    
+    async initializeTensorFlow() {
+        try {
+            await tf.ready();
+            Logger.info('TensorFlow.js initialized for CNN', {
+                backend: tf.getBackend(),
+                version: tf.version.tfjs
+            });
+        } catch (error) {
+            Logger.error('Failed to initialize TensorFlow.js for CNN', { error: error.message });
+        }
+    }
+    
+    buildModel() {
+        try {
+            Logger.info('Building CNN model for time series...');
+            
+            this.model = tf.sequential();
+            
+            // Input layer - reshape for 1D convolution
+            this.model.add(tf.layers.reshape({
+                inputShape: [this.sequenceLength, this.features],
+                targetShape: [this.sequenceLength, this.features, 1]
+            }));
+            
+            // First Convolutional Block
+            this.model.add(tf.layers.conv2d({
+                filters: this.filters[0],
+                kernelSize: [this.kernelSizes[0], 1],
+                activation: 'relu',
+                padding: 'same',
+                kernelInitializer: 'heNormal'
+            }));
+            
+            this.model.add(tf.layers.maxPooling2d({
+                poolSize: [this.poolSizes[0], 1],
+                padding: 'same'
+            }));
+            
+            this.model.add(tf.layers.dropout({ rate: this.dropout }));
+            
+            // Second Convolutional Block  
+            this.model.add(tf.layers.conv2d({
+                filters: this.filters[1],
+                kernelSize: [this.kernelSizes[1], 1],
+                activation: 'relu',
+                padding: 'same',
+                kernelInitializer: 'heNormal'
+            }));
+            
+            this.model.add(tf.layers.maxPooling2d({
+                poolSize: [this.poolSizes[1], 1],
+                padding: 'same'
+            }));
+            
+            this.model.add(tf.layers.dropout({ rate: this.dropout }));
+            
+            // Third Convolutional Block
+            this.model.add(tf.layers.conv2d({
+                filters: this.filters[2],
+                kernelSize: [this.kernelSizes[2], 1],
+                activation: 'relu',
+                padding: 'same',
+                kernelInitializer: 'heNormal'
+            }));
+            
+            // Flatten for dense layers
+            this.model.add(tf.layers.flatten());
+            
+            this.model.add(tf.layers.dropout({ rate: this.dropout }));
+            
+            // Dense layers for feature learning
+            this.model.add(tf.layers.dense({
+                units: this.denseUnits[0],
+                activation: 'relu',
+                kernelInitializer: 'heNormal'
+            }));
+            
+            this.model.add(tf.layers.dropout({ rate: this.dropout }));
+            
+            this.model.add(tf.layers.dense({
+                units: this.denseUnits[1],
+                activation: 'relu',
+                kernelInitializer: 'heNormal'
+            }));
+            
+            this.model.add(tf.layers.dropout({ rate: this.dropout / 2 }));
+            
+            // Output layer - binary classification
+            this.model.add(tf.layers.dense({
+                units: 1,
+                activation: 'sigmoid',
+                kernelInitializer: 'glorotUniform'
+            }));
+            
+            Logger.info('CNN model built successfully', {
+                totalParams: this.model.countParams(),
+                layers: this.model.layers.length,
+                outputShape: this.model.outputShape,
+                convLayers: this.filters.length,
+                denseLayers: this.denseUnits.length
+            });
+            
+            return this.model;
+            
+        } catch (error) {
+            Logger.error('Failed to build CNN model', { error: error.message });
+            throw error;
+        }
+    }
+    
+    compileModel() {
+        if (!this.model) {
+            throw new Error('Model must be built before compilation');
+        }
+        
+        try {
+            Logger.info('Compiling CNN model...');
+            
+            // Use Adam optimizer with learning rate scheduling
+            const optimizer = tf.train.adam(this.learningRate, 0.9, 0.999, 1e-8);
+            
+            this.model.compile({
+                optimizer: optimizer,
+                loss: 'binaryCrossentropy',
+                metrics: ['accuracy']
+            });
+            
+            this.isCompiled = true;
+            Logger.info('CNN model compiled successfully with comprehensive metrics');
+            
+        } catch (error) {
+            Logger.error('Failed to compile CNN model', { error: error.message });
+            throw error;
+        }
+    }
+    
+    async train(trainX, trainY, validationX, validationY, config = {}) {
+        if (!this.isCompiled) {
+            throw new Error('Model must be compiled before training');
+        }
+        
+        try {
+            this.isTraining = true;
+            
+            const epochs = config.epochs || 50;
+            const batchSize = config.batchSize || 32;
+            const verbose = config.verbose !== undefined ? config.verbose : 1;
+            const patience = config.patience || 15;
+            const learningRateDecay = config.learningRateDecay || 0.95;
+            
+            Logger.info('Starting CNN model training', {
+                epochs,
+                batchSize,
+                trainSamples: trainX.shape[0],
+                validationSamples: validationX ? validationX.shape[0] : 0,
+                patience,
+                learningRateDecay
+            });
+            
+            // Learning rate scheduler
+            let currentLR = this.learningRate;
+            let bestValLoss = Infinity;
+            let patienceCounter = 0;
+            
+            const callbacks = {
+                onEpochEnd: (epoch, logs) => {
+                    // Learning rate decay
+                    if (epoch > 0 && (epoch + 1) % 10 === 0) {
+                        currentLR *= learningRateDecay;
+                        this.model.optimizer.learningRate = currentLR;
+                        Logger.info(`Learning rate reduced to: ${currentLR.toFixed(6)}`);
+                    }
+                    
+                    // Early stopping logic
+                    if (validationX && validationY && logs.val_loss < bestValLoss) {
+                        bestValLoss = logs.val_loss;
+                        patienceCounter = 0;
+                    } else if (validationX && validationY) {
+                        patienceCounter++;
+                    }
+                    
+                    // Logging
+                    if (epoch % 5 === 0 || epoch === epochs - 1) {
+                        const logData = {
+                            loss: logs.loss.toFixed(4),
+                            accuracy: logs.acc.toFixed(4),
+                            learningRate: currentLR.toFixed(6)
+                        };
+                        
+                        if (validationX && validationY) {
+                            logData.valLoss = logs.val_loss?.toFixed(4);
+                            logData.valAccuracy = logs.val_acc?.toFixed(4);
+                            logData.patience = `${patienceCounter}/${patience}`;
+                        }
+                        
+                        Logger.info(`CNN Epoch ${epoch + 1}/${epochs}`, logData);
+                    }
+                    
+                    // Early stopping
+                    if (patienceCounter >= patience && validationX && validationY) {
+                        Logger.info(`Early stopping triggered at epoch ${epoch + 1}`);
+                        return true; // Stop training
+                    }
+                },
+                
+                onBatchEnd: (batch, logs) => {
+                    if (config.veryVerbose && batch % 20 === 0) {
+                        Logger.debug(`CNN Batch ${batch}`, {
+                            batchLoss: logs.loss.toFixed(4),
+                            batchAcc: logs.acc.toFixed(4)
+                        });
+                    }
+                }
+            };
+            
+            const trainingConfig = {
+                epochs,
+                batchSize,
+                validationData: validationX && validationY ? [validationX, validationY] : null,
+                shuffle: true,
+                verbose,
+                callbacks
+            };
+            
+            const history = await this.model.fit(trainX, trainY, trainingConfig);
+            
+            this.isTraining = false;
+            
+            // Calculate final metrics
+            const finalMetrics = {
+                finalLoss: history.history.loss[history.history.loss.length - 1].toFixed(4),
+                finalAccuracy: history.history.acc[history.history.acc.length - 1].toFixed(4),
+                epochsCompleted: history.epoch.length,
+                finalLearningRate: currentLR.toFixed(6)
+            };
+            
+            if (validationX && validationY) {
+                finalMetrics.finalValLoss = history.history.val_loss[history.history.val_loss.length - 1].toFixed(4);
+                finalMetrics.finalValAccuracy = history.history.val_acc[history.history.val_acc.length - 1].toFixed(4);
+                finalMetrics.bestValLoss = bestValLoss.toFixed(4);
+            }
+            
+            // Calculate final metrics with only accuracy
+            
+            Logger.info('CNN model training completed', finalMetrics);
+            
+            return {
+                ...history,
+                finalMetrics,
+                modelType: 'CNN',
+                bestValLoss: bestValLoss
+            };
+            
+        } catch (error) {
+            this.isTraining = false;
+            Logger.error('CNN model training failed', { error: error.message });
+            throw error;
+        }
+    }
+    
+    async predict(inputX) {
+        if (!this.model) {
+            throw new Error('Model must be built and trained before prediction');
+        }
+        
+        try {
+            Logger.debug('Making CNN prediction', {
+                inputShape: inputX.shape,
+                modelType: 'CNN'
+            });
+            
+            const prediction = this.model.predict(inputX);
+            const result = await prediction.data();
+            
+            // Clean up tensors
+            prediction.dispose();
+            
+            Logger.debug('CNN prediction completed', {
+                predictions: result.length,
+                samplePrediction: result[0]?.toFixed(4)
+            });
+            
+            return result;
+            
+        } catch (error) {
+            Logger.error('CNN prediction failed', { error: error.message });
+            throw error;
+        }
+    }
+    
+    async evaluate(testX, testY) {
+        if (!this.model) {
+            throw new Error('Model must be built and trained before evaluation');
+        }
+        
+        try {
+            Logger.info('Evaluating CNN model');
+            
+            const evaluation = this.model.evaluate(testX, testY, { verbose: 0 });
+            
+            let results;
+            if (Array.isArray(evaluation)) {
+                // Multiple metrics [loss, accuracy]
+                const metrics = await Promise.all(
+                    evaluation.map(tensor => tensor.data())
+                );
+                
+                results = {
+                    loss: metrics[0][0],
+                    accuracy: metrics[1][0]
+                };
+                
+                // Clean up tensors
+                evaluation.forEach(tensor => tensor.dispose());
+            } else {
+                // Single metric (loss only)
+                const lossData = await evaluation.data();
+                results = { loss: lossData[0] };
+                evaluation.dispose();
+            }
+            
+            Logger.info('CNN model evaluation completed', {
+                ...results,
+                modelType: 'CNN'
+            });
+            
+            return results;
+            
+        } catch (error) {
+            Logger.error('CNN model evaluation failed', { error: error.message });
+            throw error;
+        }
+    }
+    
+    // Feature importance analysis using gradient-based method
+    async getFeatureImportance(inputX, numSamples = 100) {
+        if (!this.model) {
+            throw new Error('Model must be built before feature importance analysis');
+        }
+        
+        try {
+            Logger.info('Calculating CNN feature importance');
+            
+            // Take a subset of samples for analysis
+            const sampleSize = Math.min(numSamples, inputX.shape[0]);
+            const sampleIndices = Array.from({length: sampleSize}, (_, i) => 
+                Math.floor(Math.random() * inputX.shape[0]));
+            
+            const samples = tf.gather(inputX, sampleIndices);
+            
+            // Calculate gradients with respect to input
+            const gradients = tf.variableGrads(() => {
+                const predictions = this.model.predict(samples);
+                return tf.mean(predictions);
+            }, [samples]);
+            
+            const gradientValues = await gradients.grads[0].data();
+            
+            // Calculate feature importance (average absolute gradient per feature)
+            const importance = new Array(this.features).fill(0);
+            const sequenceLength = this.sequenceLength;
+            
+            for (let i = 0; i < gradientValues.length; i++) {
+                const featureIndex = i % this.features;
+                importance[featureIndex] += Math.abs(gradientValues[i]);
+            }
+            
+            // Normalize importance scores
+            const totalImportance = importance.reduce((sum, val) => sum + val, 0);
+            const normalizedImportance = importance.map(val => 
+                totalImportance > 0 ? val / totalImportance : 0);
+            
+            // Clean up tensors
+            samples.dispose();
+            gradients.grads[0].dispose();
+            
+            Logger.info('CNN feature importance calculated', {
+                totalFeatures: this.features,
+                samplesAnalyzed: sampleSize
+            });
+            
+            return {
+                importance: normalizedImportance,
+                featureCount: this.features,
+                samplesAnalyzed: sampleSize,
+                timestamp: Date.now()
+            };
+            
+        } catch (error) {
+            Logger.error('CNN feature importance calculation failed', { error: error.message });
+            throw error;
+        }
+    }
+    
+    async save(modelPath) {
+        if (!this.model) {
+            throw new Error('Model must be built before saving');
+        }
+        
+        try {
+            Logger.info('Saving CNN model', { path: modelPath });
+            
+            await this.model.save(`file://${modelPath}`);
+            
+            // Save CNN-specific metadata
+            const metadata = {
+                modelType: 'CNN',
+                config: {
+                    sequenceLength: this.sequenceLength,
+                    features: this.features,
+                    filters: this.filters,
+                    kernelSizes: this.kernelSizes,
+                    poolSizes: this.poolSizes,
+                    denseUnits: this.denseUnits,
+                    dropout: this.dropout,
+                    learningRate: this.learningRate,
+                    l2Regularization: this.l2Regularization
+                },
+                architecture: this.getModelSummary(),
+                savedAt: Date.now(),
+                version: '1.0.0'
+            };
+            
+            // Save metadata alongside model
+            const fs = require('fs');
+            const path = require('path');
+            const metadataPath = path.join(modelPath, 'cnn_metadata.json');
+            fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+            
+            Logger.info('CNN model and metadata saved successfully');
+            
+        } catch (error) {
+            Logger.error('Failed to save CNN model', { error: error.message });
+            throw error;
+        }
+    }
+    
+    async load(modelPath) {
+        try {
+            Logger.info('Loading CNN model', { path: modelPath });
+            
+            this.model = await tf.loadLayersModel(`file://${modelPath}/model.json`);
+            this.isCompiled = true;
+            
+            // Load metadata if available
+            try {
+                const fs = require('fs');
+                const path = require('path');
+                const metadataPath = path.join(modelPath, 'cnn_metadata.json');
+                
+                if (fs.existsSync(metadataPath)) {
+                    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+                    
+                    // Restore configuration from metadata
+                    this.sequenceLength = metadata.config.sequenceLength;
+                    this.features = metadata.config.features;
+                    this.filters = metadata.config.filters;
+                    this.kernelSizes = metadata.config.kernelSizes;
+                    this.poolSizes = metadata.config.poolSizes;
+                    this.denseUnits = metadata.config.denseUnits;
+                    this.dropout = metadata.config.dropout;
+                    this.learningRate = metadata.config.learningRate;
+                    this.l2Regularization = metadata.config.l2Regularization;
+                    
+                    Logger.info('CNN metadata loaded', metadata.config);
+                }
+            } catch (metadataError) {
+                Logger.warn('Failed to load CNN metadata', { error: metadataError.message });
+            }
+            
+            Logger.info('CNN model loaded successfully', {
+                totalParams: this.model.countParams(),
+                layers: this.model.layers.length
+            });
+            
+        } catch (error) {
+            Logger.error('Failed to load CNN model', { error: error.message });
+            throw error;
+        }
+    }
+    
+    getModelSummary() {
+        if (!this.model) {
+            return 'CNN model not built yet';
+        }
+        
+        return {
+            modelType: 'CNN',
+            layers: this.model.layers.length,
+            totalParams: this.model.countParams(),
+            trainableParams: this.model.countParams(),
+            inputShape: this.model.inputShape,
+            outputShape: this.model.outputShape,
+            isCompiled: this.isCompiled,
+            isTraining: this.isTraining,
+            config: {
+                sequenceLength: this.sequenceLength,
+                features: this.features,
+                filters: this.filters,
+                kernelSizes: this.kernelSizes,
+                poolSizes: this.poolSizes,
+                denseUnits: this.denseUnits,
+                dropout: this.dropout,
+                learningRate: this.learningRate,
+                l2Regularization: this.l2Regularization
+            },
+            architecture: this.model.layers.map(layer => ({
+                name: layer.name,
+                type: layer.getClassName(),
+                inputShape: layer.inputShape,
+                outputShape: layer.outputShape,
+                params: layer.countParams()
+            }))
+        };
+    }
+    
+    // Get pattern recognition insights
+    async analyzePatterns(inputX, topK = 5) {
+        if (!this.model) {
+            throw new Error('Model must be built for pattern analysis');
+        }
+        
+        try {
+            // Get predictions for the input
+            const predictions = await this.predict(inputX);
+            
+            // Analyze confidence distribution
+            const confidences = predictions.map(pred => Math.abs(pred - 0.5) * 2);
+            const avgConfidence = confidences.reduce((sum, conf) => sum + conf, 0) / confidences.length;
+            
+            // Find most confident predictions
+            const indexedPredictions = predictions.map((pred, index) => ({ index, pred, confidence: confidences[index] }));
+            const topPredictions = indexedPredictions
+                .sort((a, b) => b.confidence - a.confidence)
+                .slice(0, topK);
+            
+            return {
+                totalPredictions: predictions.length,
+                averageConfidence: avgConfidence,
+                topPredictions: topPredictions,
+                confidenceDistribution: {
+                    veryHigh: confidences.filter(c => c > 0.8).length,
+                    high: confidences.filter(c => c > 0.6 && c <= 0.8).length,
+                    medium: confidences.filter(c => c > 0.4 && c <= 0.6).length,
+                    low: confidences.filter(c => c > 0.2 && c <= 0.4).length,
+                    veryLow: confidences.filter(c => c <= 0.2).length
+                },
+                modelType: 'CNN',
+                timestamp: Date.now()
+            };
+            
+        } catch (error) {
+            Logger.error('CNN pattern analysis failed', { error: error.message });
+            throw error;
+        }
+    }
+    
+    dispose() {
+        if (this.model) {
+            this.model.dispose();
+            this.model = null;
+            this.isCompiled = false;
+            Logger.info('CNN model disposed');
+        }
+    }
+    
+    getMemoryUsage() {
+        return {
+            numTensors: tf.memory().numTensors,
+            numBytes: tf.memory().numBytes,
+            modelLoaded: !!this.model,
+            isTraining: this.isTraining,
+            modelType: 'CNN'
+        };
+    }
+    
+    validateInput(inputX) {
+        if (!inputX || !inputX.shape) {
+            throw new Error('Invalid input: must be a tensor');
+        }
+        
+        const expectedShape = [null, this.sequenceLength, this.features];
+        const actualShape = inputX.shape;
+        
+        if (actualShape.length !== 3) {
+            throw new Error(`Invalid input shape: expected 3D tensor, got ${actualShape.length}D`);
+        }
+        
+        if (actualShape[1] !== this.sequenceLength) {
+            throw new Error(`Invalid sequence length: expected ${this.sequenceLength}, got ${actualShape[1]}`);
+        }
+        
+        if (actualShape[2] !== this.features) {
+            throw new Error(`Invalid feature count: expected ${this.features}, got ${actualShape[2]}`);
+        }
+        
+        return true;
+    }
+}
+
+module.exports = CNNModel;

@@ -4,6 +4,10 @@ const DataClient = require('../data/DataClient');
 const FeatureExtractor = require('../data/FeatureExtractor');
 const DataPreprocessor = require('../data/DataPreprocessor');
 const LSTMModel = require('../models/LSTMModel');
+const GRUModel = require('../models/GRUModel');
+const CNNModel = require('../models/CNNModel');
+const TransformerModel = require('../models/TransformerModel');
+const ModelEnsemble = require('../models/ModelEnsemble');
 const { Logger, MLStorage } = require('../utils');
 
 class MLServer {
@@ -15,9 +19,15 @@ class MLServer {
         this.dataClient = null;
         this.featureExtractor = null;
         this.preprocessor = null;
-        this.models = {}; // Store models for each pair
+        this.models = {}; // Store individual models for each pair
+        this.ensembles = {}; // Store ensemble models for each pair
         this.predictions = {}; // Cache recent predictions
         this.mlStorage = null; // Advanced persistence
+        
+        // Model configuration
+        this.modelTypes = ['lstm', 'gru', 'cnn', 'transformer'];
+        this.enabledModels = config.get('ml.ensemble.enabledModels') || this.modelTypes;
+        this.ensembleStrategy = config.get('ml.ensemble.strategy') || 'weighted';
         
         this.initializeServices();
         this.setupRoutes();
@@ -25,7 +35,7 @@ class MLServer {
     }
     
     initializeServices() {
-        Logger.info('Initializing ML services...');
+        Logger.info('Initializing Enhanced ML services with Model Ensemble...');
         
         // Initialize data client
         this.dataClient = new DataClient();
@@ -44,7 +54,10 @@ class MLServer {
             enableCache: config.get('ml.storage.enableCache')
         });
         
-        Logger.info('ML services initialized successfully');
+        Logger.info('Enhanced ML services initialized successfully', {
+            enabledModels: this.enabledModels,
+            ensembleStrategy: this.ensembleStrategy
+        });
     }
     
     setupMiddleware() {
@@ -74,21 +87,36 @@ class MLServer {
     }
     
     setupRoutes() {
-        // Health check with storage information
+        // Enhanced health check with ensemble information
         this.app.get('/api/health', async (req, res) => {
             try {
                 const coreHealth = await this.dataClient.checkCoreHealth();
                 const storageStats = this.mlStorage.getStorageStats();
                 
+                // Get ensemble statistics
+                const ensembleStats = {};
+                for (const [pair, ensemble] of Object.entries(this.ensembles)) {
+                    ensembleStats[pair] = ensemble.getEnsembleStats();
+                }
+                
                 res.json({
                     status: 'healthy',
-                    service: 'trading-bot-ml',
+                    service: 'trading-bot-ml-enhanced',
                     timestamp: Date.now(),
                     uptime: this.getUptime(),
                     core: coreHealth,
                     models: {
-                        loaded: Object.keys(this.models).length,
-                        pairs: Object.keys(this.models)
+                        individual: {
+                            loaded: Object.keys(this.models).length,
+                            pairs: Object.keys(this.models)
+                        },
+                        ensembles: {
+                            loaded: Object.keys(this.ensembles).length,
+                            pairs: Object.keys(this.ensembles),
+                            stats: ensembleStats
+                        },
+                        enabledTypes: this.enabledModels,
+                        strategy: this.ensembleStrategy
                     },
                     predictions: {
                         cached: Object.keys(this.predictions).length,
@@ -104,14 +132,237 @@ class MLServer {
                 Logger.error('Health check failed', { error: error.message });
                 res.status(500).json({
                     status: 'unhealthy',
-                    service: 'trading-bot-ml',
+                    service: 'trading-bot-ml-enhanced',
                     error: error.message,
                     timestamp: Date.now()
                 });
             }
         });
         
-        // Storage management endpoints
+        // Enhanced prediction endpoint with ensemble
+        this.app.get('/api/predictions/:pair', async (req, res) => {
+            try {
+                const pair = req.params.pair.toUpperCase();
+                const useEnsemble = req.query.ensemble !== 'false'; // Default to ensemble
+                const strategy = req.query.strategy || this.ensembleStrategy;
+                
+                let prediction;
+                if (useEnsemble) {
+                    prediction = await this.getEnsemblePrediction(pair, { strategy });
+                } else {
+                    prediction = await this.getSingleModelPrediction(pair, req.query.model || 'lstm');
+                }
+                
+                // Save prediction to persistent storage
+                await this.mlStorage.savePredictionHistory(pair, {
+                    ...prediction,
+                    timestamp: Date.now(),
+                    requestId: `${pair}_${Date.now()}`,
+                    useEnsemble: useEnsemble,
+                    strategy: useEnsemble ? strategy : null
+                });
+                
+                res.json({
+                    pair,
+                    prediction,
+                    ensemble: useEnsemble,
+                    strategy: useEnsemble ? strategy : null,
+                    timestamp: Date.now(),
+                    cached: this.predictions[pair] && 
+                           (Date.now() - this.predictions[pair].timestamp) < 60000
+                });
+                
+            } catch (error) {
+                Logger.error(`Prediction failed for ${req.params.pair}`, { 
+                    error: error.message 
+                });
+                res.status(500).json({
+                    error: 'Prediction failed',
+                    message: error.message,
+                    pair: req.params.pair.toUpperCase()
+                });
+            }
+        });
+        
+        // Get ensemble statistics
+        this.app.get('/api/ensemble/:pair/stats', (req, res) => {
+            try {
+                const pair = req.params.pair.toUpperCase();
+                const ensemble = this.ensembles[pair];
+                
+                if (!ensemble) {
+                    res.status(404).json({
+                        error: 'Ensemble not found',
+                        pair: pair,
+                        available: Object.keys(this.ensembles)
+                    });
+                    return;
+                }
+                
+                const stats = ensemble.getEnsembleStats();
+                res.json({
+                    pair,
+                    ensemble: stats,
+                    timestamp: Date.now()
+                });
+                
+            } catch (error) {
+                Logger.error(`Ensemble stats failed for ${req.params.pair}`, { 
+                    error: error.message 
+                });
+                res.status(500).json({
+                    error: 'Ensemble stats failed',
+                    message: error.message,
+                    pair: req.params.pair.toUpperCase()
+                });
+            }
+        });
+        
+        // Update ensemble weights
+        this.app.post('/api/ensemble/:pair/weights', async (req, res) => {
+            try {
+                const pair = req.params.pair.toUpperCase();
+                const weights = req.body.weights;
+                
+                if (!weights || typeof weights !== 'object') {
+                    res.status(400).json({
+                        error: 'Invalid weights format',
+                        expected: 'Object with model names as keys and weights as values'
+                    });
+                    return;
+                }
+                
+                const ensemble = this.ensembles[pair];
+                if (!ensemble) {
+                    res.status(404).json({
+                        error: 'Ensemble not found',
+                        pair: pair
+                    });
+                    return;
+                }
+                
+                ensemble.updateWeights(weights);
+                
+                // Save updated ensemble configuration
+                await this.mlStorage.saveModelMetadata(`${pair}_ensemble`, {
+                    ensembleConfig: ensemble.toJSON(),
+                    weightsUpdated: Date.now(),
+                    updatedBy: 'api'
+                });
+                
+                res.json({
+                    success: true,
+                    pair: pair,
+                    newWeights: ensemble.weights,
+                    timestamp: Date.now()
+                });
+                
+            } catch (error) {
+                Logger.error(`Weight update failed for ${req.params.pair}`, { 
+                    error: error.message 
+                });
+                res.status(500).json({
+                    error: 'Weight update failed',
+                    message: error.message
+                });
+            }
+        });
+        
+        // Train ensemble models
+        this.app.post('/api/train/:pair/ensemble', async (req, res) => {
+            try {
+                const pair = req.params.pair.toUpperCase();
+                const trainingConfig = req.body || {};
+                
+                // Start ensemble training in background
+                this.trainEnsembleModels(pair, trainingConfig).catch(error => {
+                    Logger.error(`Background ensemble training failed for ${pair}`, { 
+                        error: error.message 
+                    });
+                });
+                
+                res.json({
+                    message: `Ensemble training started for ${pair}`,
+                    pair,
+                    modelTypes: this.enabledModels,
+                    config: trainingConfig,
+                    timestamp: Date.now()
+                });
+                
+            } catch (error) {
+                Logger.error(`Ensemble training start failed for ${req.params.pair}`, { 
+                    error: error.message 
+                });
+                res.status(500).json({
+                    error: 'Ensemble training start failed',
+                    message: error.message,
+                    pair: req.params.pair.toUpperCase()
+                });
+            }
+        });
+        
+        // Compare model performance
+        this.app.get('/api/models/:pair/compare', async (req, res) => {
+            try {
+                const pair = req.params.pair.toUpperCase();
+                const comparison = await this.compareModelPerformance(pair);
+                
+                res.json({
+                    pair,
+                    comparison,
+                    timestamp: Date.now()
+                });
+                
+            } catch (error) {
+                Logger.error(`Model comparison failed for ${req.params.pair}`, { 
+                    error: error.message 
+                });
+                res.status(500).json({
+                    error: 'Model comparison failed',
+                    message: error.message,
+                    pair: req.params.pair.toUpperCase()
+                });
+            }
+        });
+        
+        // Get individual model prediction
+        this.app.get('/api/models/:pair/:modelType/predict', async (req, res) => {
+            try {
+                const pair = req.params.pair.toUpperCase();
+                const modelType = req.params.modelType.toLowerCase();
+                
+                if (!this.enabledModels.includes(modelType)) {
+                    res.status(400).json({
+                        error: 'Model type not enabled',
+                        modelType: modelType,
+                        enabled: this.enabledModels
+                    });
+                    return;
+                }
+                
+                const prediction = await this.getSingleModelPrediction(pair, modelType);
+                
+                res.json({
+                    pair,
+                    modelType,
+                    prediction,
+                    timestamp: Date.now()
+                });
+                
+            } catch (error) {
+                Logger.error(`Individual model prediction failed`, { 
+                    error: error.message,
+                    pair: req.params.pair,
+                    modelType: req.params.modelType
+                });
+                res.status(500).json({
+                    error: 'Individual model prediction failed',
+                    message: error.message
+                });
+            }
+        });
+        
+        // Existing routes (enhanced with ensemble support)
         this.app.get('/api/storage/stats', (req, res) => {
             try {
                 const stats = this.mlStorage.getStorageStats();
@@ -167,89 +418,14 @@ class MLServer {
             }
         });
         
-        // Get ML predictions for a specific pair
-        this.app.get('/api/predictions/:pair', async (req, res) => {
-            try {
-                const pair = req.params.pair.toUpperCase();
-                const prediction = await this.getPrediction(pair);
-                
-                // Save prediction to persistent storage
-                await this.mlStorage.savePredictionHistory(pair, {
-                    ...prediction,
-                    timestamp: Date.now(),
-                    requestId: `${pair}_${Date.now()}`
-                });
-                
-                res.json({
-                    pair,
-                    prediction,
-                    timestamp: Date.now(),
-                    cached: this.predictions[pair] && 
-                           (Date.now() - this.predictions[pair].timestamp) < 60000 // 1 minute cache
-                });
-                
-            } catch (error) {
-                Logger.error(`Prediction failed for ${req.params.pair}`, { 
-                    error: error.message 
-                });
-                res.status(500).json({
-                    error: 'Prediction failed',
-                    message: error.message,
-                    pair: req.params.pair.toUpperCase()
-                });
-            }
-        });
-        
-        // Get predictions for all pairs
-        this.app.get('/api/predictions', async (req, res) => {
-            try {
-                const allData = await this.dataClient.getAllData();
-                const predictions = {};
-                
-                for (const pair of allData.pairs) {
-                    try {
-                        predictions[pair] = await this.getPrediction(pair);
-                        
-                        // Save to persistent storage
-                        await this.mlStorage.savePredictionHistory(pair, {
-                            ...predictions[pair],
-                            timestamp: Date.now(),
-                            requestId: `${pair}_batch_${Date.now()}`
-                        });
-                    } catch (error) {
-                        Logger.warn(`Failed to get prediction for ${pair}`, { 
-                            error: error.message 
-                        });
-                        predictions[pair] = {
-                            error: error.message,
-                            timestamp: Date.now()
-                        };
-                    }
-                }
-                
-                res.json({
-                    predictions,
-                    timestamp: Date.now(),
-                    pairs: allData.pairs
-                });
-                
-            } catch (error) {
-                Logger.error('Failed to get all predictions', { error: error.message });
-                res.status(500).json({
-                    error: 'Failed to get predictions',
-                    message: error.message
-                });
-            }
-        });
-        
-        // Get extracted features for a pair with caching
+        // Enhanced features endpoint
         this.app.get('/api/features/:pair', async (req, res) => {
             try {
                 const pair = req.params.pair.toUpperCase();
                 
                 // Try to load from cache first
                 const cachedFeatures = this.mlStorage.loadFeatureCache(pair);
-                if (cachedFeatures && (Date.now() - cachedFeatures.timestamp) < 300000) { // 5 minute cache
+                if (cachedFeatures && (Date.now() - cachedFeatures.timestamp) < 300000) {
                     res.json({
                         pair,
                         features: cachedFeatures.features,
@@ -267,7 +443,7 @@ class MLServer {
                 await this.mlStorage.saveFeatureCache(pair, {
                     count: features.features.length,
                     names: features.featureNames,
-                    values: features.features.slice(0, 10), // First 10 for preview
+                    values: features.features.slice(0, 10),
                     metadata: features.metadata
                 });
                 
@@ -276,7 +452,7 @@ class MLServer {
                     features: {
                         count: features.features.length,
                         names: features.featureNames,
-                        values: features.features.slice(0, 10), // First 10 for preview
+                        values: features.features.slice(0, 10),
                         metadata: features.metadata
                     },
                     timestamp: Date.now(),
@@ -295,55 +471,40 @@ class MLServer {
             }
         });
         
-        // Train model for a specific pair with history tracking
-        this.app.post('/api/train/:pair', async (req, res) => {
-            try {
-                const pair = req.params.pair.toUpperCase();
-                const trainingConfig = req.body || {};
-                
-                // Start training in background
-                this.trainModelWithHistory(pair, trainingConfig).catch(error => {
-                    Logger.error(`Background training failed for ${pair}`, { 
-                        error: error.message 
-                    });
-                });
-                
-                res.json({
-                    message: `Training started for ${pair}`,
-                    pair,
-                    config: trainingConfig,
-                    timestamp: Date.now()
-                });
-                
-            } catch (error) {
-                Logger.error(`Training start failed for ${req.params.pair}`, { 
-                    error: error.message 
-                });
-                res.status(500).json({
-                    error: 'Training start failed',
-                    message: error.message,
-                    pair: req.params.pair.toUpperCase()
-                });
-            }
-        });
-        
-        // Get model status with persistent data
+        // Enhanced model status with ensemble info
         this.app.get('/api/models/:pair/status', async (req, res) => {
             try {
                 const pair = req.params.pair.toUpperCase();
-                const model = this.models[pair];
+                const pairModels = this.models[pair] || {};
+                const ensemble = this.ensembles[pair];
                 
                 // Load persistent model metadata
                 const modelMetadata = this.mlStorage.loadModelMetadata(pair);
                 const trainingHistory = this.mlStorage.loadTrainingHistory(pair);
+                const ensembleMetadata = this.mlStorage.loadModelMetadata(`${pair}_ensemble`);
+                
+                const individualModels = {};
+                for (const modelType of this.enabledModels) {
+                    const model = pairModels[modelType];
+                    individualModels[modelType] = {
+                        hasModel: !!model,
+                        modelInfo: model ? model.getModelSummary() : null
+                    };
+                }
                 
                 res.json({
                     pair,
-                    hasModel: !!model,
-                    modelInfo: model ? model.getModelSummary() : null,
+                    individual: individualModels,
+                    ensemble: {
+                        hasEnsemble: !!ensemble,
+                        stats: ensemble ? ensemble.getEnsembleStats() : null,
+                        strategy: this.ensembleStrategy,
+                        enabledModels: this.enabledModels
+                    },
                     persistent: {
                         metadata: modelMetadata,
                         trainingHistory: trainingHistory,
+                        ensembleMetadata: ensembleMetadata,
                         lastTrained: trainingHistory ? trainingHistory.timestamp : null
                     },
                     timestamp: Date.now()
@@ -360,7 +521,7 @@ class MLServer {
             }
         });
         
-        // Get prediction history for a pair
+        // Enhanced prediction history
         this.app.get('/api/predictions/:pair/history', (req, res) => {
             try {
                 const pair = req.params.pair.toUpperCase();
@@ -381,18 +542,29 @@ class MLServer {
                 let predictions = history.predictions || [];
                 const limit = parseInt(req.query.limit) || 100;
                 const since = req.query.since ? parseInt(req.query.since) : null;
+                const ensemble = req.query.ensemble; // 'true', 'false', or undefined
                 
                 if (since) {
                     predictions = predictions.filter(p => p.timestamp >= since);
                 }
                 
-                predictions = predictions.slice(-limit); // Get most recent
+                if (ensemble !== undefined) {
+                    const useEnsemble = ensemble === 'true';
+                    predictions = predictions.filter(p => p.useEnsemble === useEnsemble);
+                }
+                
+                predictions = predictions.slice(-limit);
                 
                 res.json({
                     pair,
                     predictions,
                     count: predictions.length,
                     totalCount: history.count,
+                    filters: {
+                        limit,
+                        since,
+                        ensemble: ensemble !== undefined ? ensemble === 'true' : null
+                    },
                     timestamp: Date.now()
                 });
                 
@@ -408,32 +580,44 @@ class MLServer {
             }
         });
         
-        // List all available endpoints
+        // Enhanced API endpoints list
         this.app.get('/api', (req, res) => {
             res.json({
-                service: 'trading-bot-ml',
-                version: '1.0.0',
+                service: 'trading-bot-ml-enhanced',
+                version: '2.0.0',
+                features: [
+                    'Model Ensemble System',
+                    'Multiple Model Types (LSTM, GRU, CNN, Transformer)',
+                    'Weighted Voting Strategies',
+                    'Performance Tracking',
+                    'Advanced Persistence'
+                ],
                 endpoints: [
-                    'GET /api/health - Service health check with storage info',
-                    'GET /api/predictions - Get all predictions',
-                    'GET /api/predictions/:pair - Get prediction for specific pair',
-                    'GET /api/predictions/:pair/history - Get prediction history for pair',
-                    'GET /api/features/:pair - Get extracted features for pair',
-                    'POST /api/train/:pair - Start training model for pair',
-                    'GET /api/models/:pair/status - Get model status with history',
-                    'GET /api/storage/stats - Get storage statistics',
+                    'GET /api/health - Enhanced service health with ensemble info',
+                    'GET /api/predictions/:pair - Ensemble predictions with strategy options',
+                    'GET /api/predictions/:pair/history - Enhanced prediction history with filters',
+                    'GET /api/ensemble/:pair/stats - Ensemble statistics and performance',
+                    'POST /api/ensemble/:pair/weights - Update ensemble weights',
+                    'POST /api/train/:pair/ensemble - Train all models in ensemble',
+                    'GET /api/models/:pair/compare - Compare individual model performance',
+                    'GET /api/models/:pair/:modelType/predict - Individual model predictions',
+                    'GET /api/models/:pair/status - Enhanced model status with ensemble info',
+                    'GET /api/features/:pair - Feature extraction with caching',
+                    'GET /api/storage/stats - Storage statistics',
                     'POST /api/storage/save - Force save all data',
                     'POST /api/storage/cleanup - Clean up old files'
                 ],
+                modelTypes: this.enabledModels,
+                ensembleStrategies: ['weighted', 'majority', 'average', 'confidence_weighted'],
+                currentStrategy: this.ensembleStrategy,
                 storage: {
                     enabled: true,
                     features: [
                         'Atomic file writes',
-                        'Prediction history tracking',
-                        'Model metadata persistence',
-                        'Feature caching',
-                        'Training history storage',
-                        'Automatic cleanup'
+                        'Ensemble configuration persistence',
+                        'Individual model metadata',
+                        'Performance history tracking',
+                        'Prediction history with ensemble info'
                     ]
                 },
                 timestamp: Date.now()
@@ -441,63 +625,214 @@ class MLServer {
         });
     }
     
-    async getPrediction(pair) {
+    // Enhanced prediction with ensemble support
+    async getEnsemblePrediction(pair, options = {}) {
+        const cacheKey = `${pair}_ensemble`;
+        
         // Check cache first
-        if (this.predictions[pair] && 
-            (Date.now() - this.predictions[pair].timestamp) < 60000) { // 1 minute cache
-            return this.predictions[pair];
+        if (this.predictions[cacheKey] && 
+            (Date.now() - this.predictions[cacheKey].timestamp) < 60000) {
+            return this.predictions[cacheKey];
         }
         
         try {
-            // Get data from core
-            const pairData = await this.dataClient.getPairData(pair);
-            
-            // Extract features
-            const features = this.featureExtractor.extractFeatures(pairData);
-            
-            // Get or create model
-            let model = this.models[pair];
-            if (!model) {
-                model = await this.getOrCreateModel(pair, features.features.length);
+            // Get or create ensemble
+            let ensemble = this.ensembles[pair];
+            if (!ensemble) {
+                ensemble = await this.getOrCreateEnsemble(pair);
             }
             
-            // Make prediction
-            const prediction = await this.makePrediction(model, features.features);
+            // Get data and extract features
+            const pairData = await this.dataClient.getPairData(pair);
+            const features = this.featureExtractor.extractFeatures(pairData);
+            
+            // Prepare input for prediction
+            const inputData = await this.prepareRealTimeInput(features.features);
+            
+            // Make ensemble prediction
+            const prediction = await ensemble.predict(inputData, options);
             
             // Cache result
-            this.predictions[pair] = {
+            this.predictions[cacheKey] = {
                 ...prediction,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                type: 'ensemble'
             };
             
-            return this.predictions[pair];
+            return this.predictions[cacheKey];
             
         } catch (error) {
-            Logger.error(`Prediction failed for ${pair}`, { error: error.message });
+            Logger.error(`Ensemble prediction failed for ${pair}`, { error: error.message });
             throw error;
         }
     }
     
-    async getOrCreateModel(pair, featureCount) {
-        Logger.info(`Creating new model for ${pair}`, { featureCount });
+    // Get single model prediction
+    async getSingleModelPrediction(pair, modelType) {
+        const cacheKey = `${pair}_${modelType}`;
         
-        // Check if we have persistent model metadata
-        const modelMetadata = this.mlStorage.loadModelMetadata(pair);
+        // Check cache first
+        if (this.predictions[cacheKey] && 
+            (Date.now() - this.predictions[cacheKey].timestamp) < 60000) {
+            return this.predictions[cacheKey];
+        }
         
-        const modelConfig = {
-            ...config.get('ml.models.lstm'),
+        try {
+            // Get or create model
+            let model = this.models[pair] && this.models[pair][modelType];
+            if (!model) {
+                const pairData = await this.dataClient.getPairData(pair);
+                const features = this.featureExtractor.extractFeatures(pairData);
+                model = await this.getOrCreateModel(pair, modelType, features.features.length);
+            }
+            
+            // Get data and extract features
+            const pairData = await this.dataClient.getPairData(pair);
+            const features = this.featureExtractor.extractFeatures(pairData);
+            
+            // Prepare input for prediction
+            const inputData = await this.prepareRealTimeInput(features.features);
+            
+            // Make prediction
+            const predictions = await model.predict(inputData);
+            const prediction = predictions[0];
+            
+            const result = {
+                prediction: prediction,
+                confidence: Math.abs(prediction - 0.5) * 2,
+                direction: prediction > 0.5 ? 'up' : 'down',
+                signal: this.getTradeSignal(prediction, Math.abs(prediction - 0.5) * 2),
+                modelType: modelType,
+                individual: {
+                    prediction: prediction,
+                    confidence: Math.abs(prediction - 0.5) * 2
+                },
+                metadata: {
+                    timestamp: Date.now(),
+                    version: '2.0.0',
+                    type: 'individual_prediction'
+                }
+            };
+            
+            // Cache result
+            this.predictions[cacheKey] = {
+                ...result,
+                timestamp: Date.now(),
+                type: 'individual'
+            };
+            
+            return this.predictions[cacheKey];
+            
+        } catch (error) {
+            Logger.error(`Individual prediction failed for ${pair}:${modelType}`, { error: error.message });
+            throw error;
+        }
+    }
+    
+    // Create or get ensemble for a pair
+    async getOrCreateEnsemble(pair) {
+        Logger.info(`Creating ensemble for ${pair}`);
+        
+        // Check if we have persistent ensemble metadata
+        const ensembleMetadata = this.mlStorage.loadModelMetadata(`${pair}_ensemble`);
+        
+        const ensembleConfig = {
+            modelTypes: this.enabledModels,
+            votingStrategy: this.ensembleStrategy,
+            weights: {}
+        };
+        
+        // Restore weights from metadata if available
+        if (ensembleMetadata && ensembleMetadata.ensembleConfig) {
+            ensembleConfig.weights = ensembleMetadata.ensembleConfig.weights || {};
+            ensembleConfig.votingStrategy = ensembleMetadata.ensembleConfig.votingStrategy || this.ensembleStrategy;
+        }
+        
+        const ensemble = new ModelEnsemble(ensembleConfig);
+        
+        // Get feature count from data
+        const pairData = await this.dataClient.getPairData(pair);
+        const features = this.featureExtractor.extractFeatures(pairData);
+        const featureCount = features.features.length;
+        
+        // Create and add individual models to ensemble
+        for (const modelType of this.enabledModels) {
+            try {
+                const model = await this.getOrCreateModel(pair, modelType, featureCount);
+                const weight = ensembleConfig.weights[modelType] || 1.0;
+                
+                ensemble.addModel(modelType, model, weight, {
+                    pair: pair,
+                    featureCount: featureCount,
+                    created: Date.now()
+                });
+                
+                Logger.info(`Added ${modelType} model to ${pair} ensemble`, { weight });
+                
+            } catch (error) {
+                Logger.error(`Failed to add ${modelType} to ensemble for ${pair}`, { 
+                    error: error.message 
+                });
+            }
+        }
+        
+        this.ensembles[pair] = ensemble;
+        
+        // Save ensemble metadata
+        await this.mlStorage.saveModelMetadata(`${pair}_ensemble`, {
+            ensembleConfig: ensemble.toJSON(),
+            created: Date.now(),
+            pair: pair,
+            modelTypes: this.enabledModels
+        });
+        
+        return ensemble;
+    }
+    
+    // Create individual model
+    async getOrCreateModel(pair, modelType, featureCount) {
+        if (!this.models[pair]) {
+            this.models[pair] = {};
+        }
+        
+        if (this.models[pair][modelType]) {
+            return this.models[pair][modelType];
+        }
+        
+        Logger.info(`Creating ${modelType} model for ${pair}`, { featureCount });
+        
+        const baseConfig = {
+            sequenceLength: this.preprocessor.sequenceLength,
             features: featureCount
         };
         
-        const model = new LSTMModel(modelConfig);
+        let model;
+        switch (modelType) {
+            case 'lstm':
+                model = new LSTMModel({ ...baseConfig, ...config.get('ml.models.lstm') });
+                break;
+            case 'gru':
+                model = new GRUModel({ ...baseConfig, ...config.get('ml.models.gru') });
+                break;
+            case 'cnn':
+                model = new CNNModel({ ...baseConfig, ...config.get('ml.models.cnn') });
+                break;
+            case 'transformer':
+                model = new TransformerModel({ ...baseConfig, ...config.get('ml.models.transformer') });
+                break;
+            default:
+                throw new Error(`Unknown model type: ${modelType}`);
+        }
+        
         model.buildModel();
         model.compileModel();
         
-        this.models[pair] = model;
+        this.models[pair][modelType] = model;
         
         // Save model metadata
-        await this.mlStorage.saveModelMetadata(pair, {
-            config: modelConfig,
+        await this.mlStorage.saveModelMetadata(`${pair}_${modelType}`, {
+            config: baseConfig,
+            modelType: modelType,
             created: Date.now(),
             featureCount,
             status: 'created'
@@ -506,87 +841,270 @@ class MLServer {
         return model;
     }
     
-    async makePrediction(model, features) {
-        try {
-            // For now, return a mock prediction
-            // In real implementation, we would:
-            // 1. Prepare features for real-time prediction
-            // 2. Use trained model to predict
-            // 3. Return formatted prediction
-            
-            const mockPrediction = Math.random();
-            
-            return {
-                direction: mockPrediction > 0.5 ? 'up' : 'down',
-                confidence: Math.abs(mockPrediction - 0.5) * 2,
-                probability: mockPrediction,
-                signal: mockPrediction > 0.7 ? 'BUY' : 
-                        mockPrediction < 0.3 ? 'SELL' : 'HOLD',
-                features: {
-                    count: features.length,
-                    sample: features.slice(0, 5) // First 5 features for debugging
-                },
-                model: 'LSTM',
-                version: '1.0.0'
-            };
-            
-        } catch (error) {
-            Logger.error('Prediction failed', { error: error.message });
-            throw error;
-        }
+    // Prepare real-time input from features
+    async prepareRealTimeInput(features) {
+        // This is a simplified version - in practice, you'd use the preprocessor
+        // to create proper sequences from historical feature data
+        
+        const sequenceLength = this.preprocessor.sequenceLength;
+        
+        // Create a mock sequence by repeating the current features
+        const sequence = Array(sequenceLength).fill(features);
+        
+        // Convert to tensor
+        const inputTensor = tf.tensor3d([sequence]); // Shape: [1, sequenceLength, features]
+        
+        return inputTensor;
     }
     
-    async trainModelWithHistory(pair, config = {}) {
-        Logger.info(`Starting training for ${pair}`, config);
+    // Compare model performance
+    async compareModelPerformance(pair) {
+        const comparison = {
+            pair: pair,
+            models: {},
+            ensemble: null,
+            timestamp: Date.now()
+        };
+        
+        // Get sample data for comparison
+        try {
+            const pairData = await this.dataClient.getPairData(pair);
+            const features = this.featureExtractor.extractFeatures(pairData);
+            const inputData = await this.prepareRealTimeInput(features.features);
+            
+            // Compare individual models
+            const pairModels = this.models[pair] || {};
+            for (const modelType of this.enabledModels) {
+                if (pairModels[modelType]) {
+                    try {
+                        const startTime = Date.now();
+                        const predictions = await pairModels[modelType].predict(inputData);
+                        const predictionTime = Date.now() - startTime;
+                        
+                        const prediction = predictions[0];
+                        const confidence = Math.abs(prediction - 0.5) * 2;
+                        
+                        comparison.models[modelType] = {
+                            prediction: prediction,
+                            confidence: confidence,
+                            direction: prediction > 0.5 ? 'up' : 'down',
+                            predictionTime: predictionTime,
+                            modelSummary: pairModels[modelType].getModelSummary(),
+                            available: true
+                        };
+                        
+                    } catch (error) {
+                        comparison.models[modelType] = {
+                            error: error.message,
+                            available: false
+                        };
+                    }
+                } else {
+                    comparison.models[modelType] = {
+                        available: false,
+                        message: 'Model not created'
+                    };
+                }
+            }
+            
+            // Compare ensemble if available
+            const ensemble = this.ensembles[pair];
+            if (ensemble) {
+                try {
+                    const startTime = Date.now();
+                    const ensemblePrediction = await ensemble.predict(inputData);
+                    const predictionTime = Date.now() - startTime;
+                    
+                    comparison.ensemble = {
+                        ...ensemblePrediction,
+                        predictionTime: predictionTime,
+                        stats: ensemble.getEnsembleStats(),
+                        available: true
+                    };
+                    
+                } catch (error) {
+                    comparison.ensemble = {
+                        error: error.message,
+                        available: false
+                    };
+                }
+            } else {
+                comparison.ensemble = {
+                    available: false,
+                    message: 'Ensemble not created'
+                };
+            }
+            
+            // Clean up tensor
+            inputData.dispose();
+            
+        } catch (error) {
+            Logger.error(`Model comparison failed for ${pair}`, { error: error.message });
+            comparison.error = error.message;
+        }
+        
+        return comparison;
+    }
+    
+    // Train ensemble models
+    async trainEnsembleModels(pair, config = {}) {
+        Logger.info(`Starting ensemble training for ${pair}`, config);
         
         try {
             // Get historical data
             const pairData = await this.dataClient.getPairData(pair);
+            const features = this.featureExtractor.extractFeatures(pairData);
+            
+            // Create targets for training
+            const targets = this.featureExtractor.createTargets(pairData.history);
+            const binaryTargets = targets[`direction_${config.targetPeriods || 5}`] || targets['direction_5'];
+            
+            if (!binaryTargets || binaryTargets.length === 0) {
+                throw new Error('No training targets available');
+            }
+            
+            // Prepare training data (simplified - in practice, use preprocessor)
+            const featuresArray = Array(binaryTargets.length).fill().map(() => features.features);
+            const processedData = await this.preprocessor.prepareTrainingData(featuresArray, binaryTargets);
             
             const trainingResults = {
-                pair,
-                config,
+                pair: pair,
                 startTime: Date.now(),
-                status: 'completed',
-                // TODO: Implement actual training results
-                epochs: config.epochs || 100,
-                finalLoss: Math.random() * 0.1,
-                finalAccuracy: 0.6 + Math.random() * 0.3,
-                trainingTime: Math.floor(Math.random() * 600000) + 300000 // 5-15 minutes
+                models: {},
+                ensemble: null,
+                config: config
             };
             
-            trainingResults.endTime = trainingResults.startTime + trainingResults.trainingTime;
+            // Train individual models
+            for (const modelType of this.enabledModels) {
+                try {
+                    Logger.info(`Training ${modelType} model for ${pair}`);
+                    
+                    const model = await this.getOrCreateModel(pair, modelType, features.features.length);
+                    
+                    const modelTrainingConfig = {
+                        epochs: config.epochs || 50,
+                        batchSize: config.batchSize || 32,
+                        verbose: 0,
+                        ...config[modelType] // Model-specific config
+                    };
+                    
+                    const history = await model.train(
+                        processedData.trainX,
+                        processedData.trainY,
+                        processedData.validationX,
+                        processedData.validationY,
+                        modelTrainingConfig
+                    );
+                    
+                    trainingResults.models[modelType] = {
+                        status: 'completed',
+                        finalMetrics: history.finalMetrics,
+                        epochsCompleted: history.epochsCompleted || history.finalMetrics.epochsCompleted,
+                        modelType: modelType
+                    };
+                    
+                    // Save individual model training history
+                    await this.mlStorage.saveTrainingHistory(`${pair}_${modelType}`, {
+                        ...trainingResults.models[modelType],
+                        pair: pair,
+                        modelType: modelType,
+                        timestamp: Date.now()
+                    });
+                    
+                    Logger.info(`${modelType} training completed for ${pair}`, 
+                        trainingResults.models[modelType].finalMetrics);
+                    
+                } catch (error) {
+                    Logger.error(`${modelType} training failed for ${pair}`, { error: error.message });
+                    trainingResults.models[modelType] = {
+                        status: 'failed',
+                        error: error.message,
+                        modelType: modelType
+                    };
+                }
+            }
             
-            // Save training history
-            await this.mlStorage.saveTrainingHistory(pair, trainingResults);
+            // Update ensemble weights based on training performance
+            const ensemble = this.ensembles[pair];
+            if (ensemble) {
+                const performanceWeights = {};
+                
+                for (const [modelType, result] of Object.entries(trainingResults.models)) {
+                    if (result.status === 'completed' && result.finalMetrics) {
+                        // Use accuracy as performance metric
+                        const accuracy = parseFloat(result.finalMetrics.finalAccuracy);
+                        performanceWeights[modelType] = isNaN(accuracy) ? 0.1 : Math.max(0.1, accuracy);
+                    } else {
+                        performanceWeights[modelType] = 0.1; // Minimum weight for failed models
+                    }
+                }
+                
+                ensemble.updateWeights(performanceWeights);
+                
+                trainingResults.ensemble = {
+                    status: 'updated',
+                    newWeights: ensemble.weights,
+                    strategy: ensemble.votingStrategy,
+                    modelCount: ensemble.models.size
+                };
+                
+                // Save updated ensemble configuration
+                await this.mlStorage.saveModelMetadata(`${pair}_ensemble`, {
+                    ensembleConfig: ensemble.toJSON(),
+                    trainingCompleted: Date.now(),
+                    performanceWeights: performanceWeights
+                });
+            }
             
-            // Update model metadata
-            await this.mlStorage.saveModelMetadata(pair, {
-                lastTrained: trainingResults.endTime,
-                trainingConfig: config,
-                performance: {
-                    loss: trainingResults.finalLoss,
-                    accuracy: trainingResults.finalAccuracy
-                },
-                status: 'trained'
+            trainingResults.endTime = Date.now();
+            trainingResults.status = 'completed';
+            trainingResults.totalTime = trainingResults.endTime - trainingResults.startTime;
+            
+            // Clean up tensors
+            processedData.trainX.dispose();
+            processedData.trainY.dispose();
+            processedData.validationX.dispose();
+            processedData.validationY.dispose();
+            processedData.testX.dispose();
+            processedData.testY.dispose();
+            
+            // Save overall ensemble training history
+            await this.mlStorage.saveTrainingHistory(`${pair}_ensemble`, trainingResults);
+            
+            Logger.info(`Ensemble training completed for ${pair}`, {
+                totalTime: trainingResults.totalTime,
+                modelsCompleted: Object.values(trainingResults.models).filter(m => m.status === 'completed').length,
+                modelsFailed: Object.values(trainingResults.models).filter(m => m.status === 'failed').length
             });
             
-            Logger.info(`Training completed for ${pair}`, trainingResults);
-            
         } catch (error) {
-            Logger.error(`Training failed for ${pair}`, { error: error.message });
+            Logger.error(`Ensemble training failed for ${pair}`, { error: error.message });
             
             // Save failed training attempt
-            await this.mlStorage.saveTrainingHistory(pair, {
-                pair,
-                config,
-                startTime: Date.now(),
+            await this.mlStorage.saveTrainingHistory(`${pair}_ensemble`, {
+                pair: pair,
                 status: 'failed',
                 error: error.message,
+                startTime: Date.now(),
                 endTime: Date.now()
             });
             
             throw error;
+        }
+    }
+    
+    // Get trade signal based on prediction and confidence
+    getTradeSignal(prediction, confidence) {
+        const strongThreshold = 0.7;
+        const weakThreshold = 0.55;
+        
+        if (confidence > strongThreshold) {
+            return prediction > 0.5 ? 'STRONG_BUY' : 'STRONG_SELL';
+        } else if (confidence > weakThreshold) {
+            return prediction > 0.5 ? 'BUY' : 'SELL';
+        } else {
+            return 'HOLD';
         }
     }
     
@@ -605,38 +1123,56 @@ class MLServer {
     
     async start() {
         try {
-            Logger.info('Starting ML Server...');
+            Logger.info('Starting Enhanced ML Server with Model Ensemble...');
             
             // Wait for core service to be ready
             await this.dataClient.waitForCoreService();
             
             // Start HTTP server
             this.server = this.app.listen(this.port, () => {
-                Logger.info(`ML Server running at http://localhost:${this.port}`);
-                console.log(`🤖 ML API available at: http://localhost:${this.port}/api`);
+                Logger.info(`Enhanced ML Server running at http://localhost:${this.port}`);
+                console.log(`🤖 Enhanced ML API available at: http://localhost:${this.port}/api`);
                 console.log(`📊 Health check: http://localhost:${this.port}/api/health`);
-                console.log(`🔮 Predictions: http://localhost:${this.port}/api/predictions`);
+                console.log(`🔮 Ensemble predictions: http://localhost:${this.port}/api/predictions/RVN`);
+                console.log(`🏆 Model comparison: http://localhost:${this.port}/api/models/RVN/compare`);
+                console.log(`⚖️ Ensemble stats: http://localhost:${this.port}/api/ensemble/RVN/stats`);
                 console.log(`💾 Storage stats: http://localhost:${this.port}/api/storage/stats`);
+                console.log('');
+                console.log('🚀 Advanced Features Available:');
+                console.log(`   • Model Types: ${this.enabledModels.join(', ')}`);
+                console.log(`   • Ensemble Strategy: ${this.ensembleStrategy}`);
+                console.log(`   • Individual Model Predictions`);
+                console.log(`   • Performance Comparison`);
+                console.log(`   • Dynamic Weight Updates`);
             });
             
         } catch (error) {
-            Logger.error('Failed to start ML server', { error: error.message });
+            Logger.error('Failed to start Enhanced ML server', { error: error.message });
             process.exit(1);
         }
     }
     
     async stop() {
-        Logger.info('Stopping ML Server...');
+        Logger.info('Stopping Enhanced ML Server...');
         
         // Shutdown storage system gracefully
         if (this.mlStorage) {
             await this.mlStorage.shutdown();
         }
         
-        // Dispose of all models
-        Object.values(this.models).forEach(model => {
-            if (model && typeof model.dispose === 'function') {
-                model.dispose();
+        // Dispose of all individual models
+        Object.values(this.models).forEach(pairModels => {
+            Object.values(pairModels).forEach(model => {
+                if (model && typeof model.dispose === 'function') {
+                    model.dispose();
+                }
+            });
+        });
+        
+        // Dispose of all ensembles
+        Object.values(this.ensembles).forEach(ensemble => {
+            if (ensemble && typeof ensemble.dispose === 'function') {
+                ensemble.dispose();
             }
         });
         
@@ -648,7 +1184,7 @@ class MLServer {
             this.server.close();
         }
         
-        Logger.info('ML Server stopped');
+        Logger.info('Enhanced ML Server stopped');
     }
 }
 

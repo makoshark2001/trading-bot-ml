@@ -13,13 +13,166 @@
       "lookbackPeriods": [5, 10, 20],
       "targetPeriods": [1, 3, 5]
     },
+    "ensemble": {
+      "enabledModels": ["lstm", "gru", "cnn", "transformer"],
+      "strategy": "weighted",
+      "autoUpdateWeights": true,
+      "minModelWeight": 0.1,
+      "performanceWindow": 100,
+      "strategies": {
+        "weighted": {
+          "description": "Use model-specific weights for voting",
+          "usePerformanceWeights": true
+        },
+        "majority": {
+          "description": "Simple majority voting (>0.5 = up)",
+          "threshold": 0.5
+        },
+        "average": {
+          "description": "Simple average of all predictions",
+          "useConfidenceWeighting": false
+        },
+        "confidence_weighted": {
+          "description": "Weight by prediction confidence",
+          "minConfidence": 0.1
+        }
+      }
+    },
     "models": {
       "lstm": {
         "sequenceLength": 60,
         "units": 50,
+        "layers": 2,
         "epochs": 100,
         "batchSize": 32,
-        "validationSplit": 0.2
+        "validationSplit": 0.2,
+        "dropout": 0.2,
+        "recurrentDropout": 0.2,
+        "learningRate": 0.001,
+        "patience": 10,
+        "features": 52
+      },
+      "gru": {
+        "sequenceLength": 60,
+        "units": 50,
+        "layers": 2,
+        "epochs": 80,
+        "batchSize": 32,
+        "validationSplit": 0.2,
+        "dropout": 0.2,
+        "recurrentDropout": 0.2,
+        "learningRate": 0.001,
+        "patience": 10,
+        "features": 52
+      },
+      "cnn": {
+        "sequenceLength": 60,
+        "filters": [32, 64, 128],
+        "kernelSizes": [3, 3, 3],
+        "poolSizes": [2, 2, 2],
+        "denseUnits": [128, 64],
+        "epochs": 60,
+        "batchSize": 32,
+        "validationSplit": 0.2,
+        "dropout": 0.3,
+        "learningRate": 0.001,
+        "l2Regularization": 0.001,
+        "patience": 15,
+        "learningRateDecay": 0.95,
+        "features": 52
+      },
+      "transformer": {
+        "sequenceLength": 60,
+        "dModel": 128,
+        "numHeads": 8,
+        "numLayers": 4,
+        "dff": 512,
+        "epochs": 100,
+        "batchSize": 16,
+        "validationSplit": 0.2,
+        "dropout": 0.1,
+        "learningRate": 0.001,
+        "usePositionalEncoding": true,
+        "maxPositionalEncoding": 1000,
+        "patience": 20,
+        "warmupSteps": 4000,
+        "features": 52
+      }
+    },
+    "training": {
+      "defaultEpochs": 50,
+      "defaultBatchSize": 32,
+      "earlyStopping": {
+        "monitor": "val_loss",
+        "patience": 15,
+        "minDelta": 0.001,
+        "restoreBestWeights": true
+      },
+      "learningRateScheduler": {
+        "enabled": true,
+        "factor": 0.5,
+        "patience": 5,
+        "minLr": 0.00001
+      },
+      "dataAugmentation": {
+        "enabled": false,
+        "noiseLevel": 0.01,
+        "timeShifting": true,
+        "scaling": true
+      },
+      "validation": {
+        "split": 0.2,
+        "shuffle": true,
+        "stratify": false
+      },
+      "optimization": {
+        "optimizer": "adam",
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "epsilon": 1e-8,
+        "clipNorm": 1.0
+      }
+    },
+    "prediction": {
+      "cacheTimeout": 60000,
+      "confidenceThresholds": {
+        "veryHigh": 0.8,
+        "high": 0.6,
+        "medium": 0.4,
+        "low": 0.2
+      },
+      "signalThresholds": {
+        "strongBuy": 0.7,
+        "buy": 0.55,
+        "hold": 0.45,
+        "sell": 0.45,
+        "strongSell": 0.3
+      },
+      "ensembleSettings": {
+        "defaultStrategy": "weighted",
+        "fallbackToSingleModel": true,
+        "fallbackModel": "lstm",
+        "requireMinimumModels": 2
+      }
+    },
+    "performance": {
+      "tracking": {
+        "enabled": true,
+        "windowSize": 1000,
+        "metrics": ["accuracy", "precision", "recall", "f1Score", "auc"],
+        "updateInterval": 100
+      },
+      "benchmarking": {
+        "enabled": true,
+        "compareModels": true,
+        "performanceReports": true,
+        "saveBenchmarks": true
+      },
+      "optimization": {
+        "autoTuning": false,
+        "hyperparameterSearch": false,
+        "modelSelection": false,
+        "ensembleOptimization": true
       }
     },
     "storage": {
@@ -27,13 +180,144 @@
       "saveInterval": 300000,
       "maxAgeHours": 168,
       "enableCache": true,
-      "autoCleanup": true
+      "autoCleanup": true,
+      "compression": {
+        "enabled": false,
+        "algorithm": "gzip",
+        "level": 6
+      },
+      "backup": {
+        "enabled": true,
+        "interval": 86400000,
+        "retention": 7,
+        "location": "data/backups"
+      },
+      "ensemble": {
+        "saveConfiguration": true,
+        "saveWeights": true,
+        "savePerformanceHistory": true,
+        "versionControl": true
+      }
+    },
+    "monitoring": {
+      "enabled": true,
+      "logLevel": "info",
+      "metrics": {
+        "predictionLatency": true,
+        "modelAccuracy": true,
+        "memoryUsage": true,
+        "errorRates": true,
+        "ensemblePerformance": true
+      },
+      "alerts": {
+        "enabled": false,
+        "lowAccuracy": 0.5,
+        "highLatency": 1000,
+        "memoryThreshold": 2048,
+        "errorThreshold": 0.1
+      },
+      "reporting": {
+        "enabled": true,
+        "interval": 3600000,
+        "includeGraphs": false,
+        "emailReports": false
+      }
     }
   },
   "server": {
-    "port": 3001
+    "port": 3001,
+    "cors": {
+      "enabled": true,
+      "origins": ["*"],
+      "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      "allowedHeaders": ["Origin", "X-Requested-With", "Content-Type", "Accept", "Authorization"]
+    },
+    "security": {
+      "rateLimit": {
+        "enabled": false,
+        "windowMs": 900000,
+        "max": 100,
+        "skipSuccessfulRequests": false
+      },
+      "authentication": {
+        "enabled": false,
+        "type": "jwt",
+        "secret": "your-secret-key",
+        "expiresIn": "1h"
+      }
+    },
+    "compression": {
+      "enabled": true,
+      "threshold": 1024,
+      "level": 6
+    },
+    "logging": {
+      "enabled": true,
+      "format": "combined",
+      "logRequests": true,
+      "logResponses": false
+    }
   },
   "trading": {
-    "pairs": ["XMR","RVN"]
+    "pairs": ["XMR", "RVN"],
+    "defaultPair": "RVN",
+    "riskManagement": {
+      "maxPositionSize": 0.1,
+      "stopLossPercent": 0.05,
+      "takeProfitPercent": 0.1,
+      "maxDailyTrades": 10
+    },
+    "signals": {
+      "minConfidence": 0.6,
+      "ensembleWeight": 0.7,
+      "technicalWeight": 0.3,
+      "useEnsembleSignals": true,
+      "fallbackToTechnical": true
+    }
+  },
+  "features": {
+    "experimental": {
+      "enabled": false,
+      "autoML": false,
+      "hyperparameterOptimization": false,
+      "neuralArchitectureSearch": false,
+      "transferLearning": false
+    },
+    "advanced": {
+      "featureSelection": false,
+      "dimensionalityReduction": false,
+      "anomalyDetection": false,
+      "timeSeriesDecomposition": false,
+      "seasonalityDetection": false
+    },
+    "integration": {
+      "backtesting": true,
+      "riskManagement": true,
+      "execution": true,
+      "dashboard": true,
+      "apiDocumentation": true
+    }
+  },
+  "development": {
+    "debug": {
+      "enabled": false,
+      "verboseLogging": false,
+      "tensorflowLogs": false,
+      "memoryTracking": false,
+      "performanceProfiling": false
+    },
+    "testing": {
+      "enabled": true,
+      "mockData": false,
+      "unitTests": true,
+      "integrationTests": true,
+      "performanceTests": false
+    },
+    "optimization": {
+      "memoryManagement": true,
+      "tensorDisposal": true,
+      "garbageCollection": true,
+      "batchOptimization": true
+    }
   }
 }
