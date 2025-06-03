@@ -884,7 +884,7 @@ class MLServer {
         return ensemble;
     }
     
-    // Create individual model
+    // Create individual model - FIXED: Use passed featureCount instead of config value
     async getOrCreateModel(pair, modelType, featureCount) {
         if (!this.models[pair]) {
             this.models[pair] = {};
@@ -907,24 +907,32 @@ class MLServer {
         
         Logger.info(`Creating ${modelType} model for ${pair}`, { featureCount });
         
+        // FIXED: Create base config with the ACTUAL feature count, not config value
         const baseConfig = {
             sequenceLength: this.preprocessor.sequenceLength,
-            features: featureCount
+            features: featureCount  // Use the passed featureCount parameter
+        };
+        
+        // Get model-specific config and OVERRIDE features with actual count
+        const modelSpecificConfig = config.get(`ml.models.${modelType}`) || {};
+        const finalConfig = {
+            ...modelSpecificConfig,  // Start with config defaults
+            ...baseConfig           // Override with actual values (especially features)
         };
         
         let model;
         switch (modelType) {
             case 'lstm':
-                model = new LSTMModel({ ...baseConfig, ...config.get('ml.models.lstm') });
+                model = new LSTMModel(finalConfig);
                 break;
             case 'gru':
-                model = new GRUModel({ ...baseConfig, ...config.get('ml.models.gru') });
+                model = new GRUModel(finalConfig);
                 break;
             case 'cnn':
-                model = new CNNModel({ ...baseConfig, ...config.get('ml.models.cnn') });
+                model = new CNNModel(finalConfig);
                 break;
             case 'transformer':
-                model = new TransformerModel({ ...baseConfig, ...config.get('ml.models.transformer') });
+                model = new TransformerModel(finalConfig);
                 break;
             default:
                 throw new Error(`Unknown model type: ${modelType}`);
@@ -935,9 +943,9 @@ class MLServer {
         
         this.models[pair][modelType] = model;
         
-        // Save model metadata with feature count
+        // Save model metadata with actual feature count
         await this.mlStorage.saveModelMetadata(`${pair}_${modelType}`, {
-            config: baseConfig,
+            config: finalConfig,  // Save the final config with correct feature count
             modelType: modelType,
             created: Date.now(),
             featureCount,
