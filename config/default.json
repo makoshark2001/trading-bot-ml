@@ -100,8 +100,24 @@
       }
     },
     "training": {
+      "autoTraining": true,
+      "periodicTraining": true,
+      "interval": 86400000,
+      "minDataAge": 43200000,
       "defaultEpochs": 50,
       "defaultBatchSize": 32,
+      "autoTrainingConfig": {
+        "epochs": 25,
+        "batchSize": 32,
+        "verbose": 0,
+        "description": "Reduced epochs for automatic training on first use"
+      },
+      "periodicTrainingConfig": {
+        "epochs": 50,
+        "batchSize": 32,
+        "verbose": 0,
+        "description": "Full training for periodic updates"
+      },
       "earlyStopping": {
         "monitor": "val_loss",
         "patience": 15,
@@ -131,6 +147,17 @@
         "beta2": 0.999,
         "epsilon": 1e-8,
         "clipNorm": 1.0
+      },
+      "scheduling": {
+        "enabled": true,
+        "checkInterval": 3600000,
+        "maxConcurrentTraining": 2,
+        "priorityPairs": ["RVN", "XMR"],
+        "trainingWindow": {
+          "start": "02:00",
+          "end": "06:00",
+          "timezone": "UTC"
+        }
       }
     },
     "prediction": {
@@ -153,6 +180,12 @@
         "fallbackToSingleModel": true,
         "fallbackModel": "lstm",
         "requireMinimumModels": 2
+      },
+      "autoTrainingFallback": {
+        "enabled": true,
+        "useRandomWeightsIfTraining": true,
+        "maxWaitForTraining": 300000,
+        "showTrainingStatus": true
       }
     },
     "performance": {
@@ -173,6 +206,12 @@
         "hyperparameterSearch": false,
         "modelSelection": false,
         "ensembleOptimization": true
+      },
+      "monitoring": {
+        "memoryThreshold": 2048,
+        "tensorThreshold": 5000,
+        "trainingTimeThreshold": 3600000,
+        "predictionLatencyThreshold": 1000
       }
     },
     "storage": {
@@ -181,6 +220,13 @@
       "maxAgeHours": 168,
       "enableCache": true,
       "autoCleanup": true,
+      "weightPersistence": {
+        "enabled": true,
+        "saveAfterTraining": true,
+        "loadOnStartup": true,
+        "compatibilityCheck": true,
+        "maxWeightAge": 604800000
+      },
       "compression": {
         "enabled": false,
         "algorithm": "gzip",
@@ -190,7 +236,8 @@
         "enabled": true,
         "interval": 86400000,
         "retention": 7,
-        "location": "data/backups"
+        "location": "data/backups",
+        "includeWeights": true
       },
       "ensemble": {
         "saveConfiguration": true,
@@ -207,20 +254,26 @@
         "modelAccuracy": true,
         "memoryUsage": true,
         "errorRates": true,
-        "ensemblePerformance": true
+        "ensemblePerformance": true,
+        "trainingProgress": true,
+        "weightPersistence": true
       },
       "alerts": {
         "enabled": false,
         "lowAccuracy": 0.5,
         "highLatency": 1000,
         "memoryThreshold": 2048,
-        "errorThreshold": 0.1
+        "errorThreshold": 0.1,
+        "trainingFailures": true,
+        "weightLoadFailures": true
       },
       "reporting": {
         "enabled": true,
         "interval": 3600000,
         "includeGraphs": false,
-        "emailReports": false
+        "emailReports": false,
+        "trainingReports": true,
+        "performanceReports": true
       }
     }
   },
@@ -272,7 +325,9 @@
       "ensembleWeight": 0.7,
       "technicalWeight": 0.3,
       "useEnsembleSignals": true,
-      "fallbackToTechnical": true
+      "fallbackToTechnical": true,
+      "requireTrainedWeights": false,
+      "autoTrainingGracePeriod": 300000
     }
   },
   "features": {
@@ -296,6 +351,13 @@
       "execution": true,
       "dashboard": true,
       "apiDocumentation": true
+    },
+    "training": {
+      "autoTraining": true,
+      "periodicTraining": true,
+      "weightPersistence": true,
+      "trainingQueue": true,
+      "backgroundTraining": true
     }
   },
   "development": {
@@ -304,20 +366,23 @@
       "verboseLogging": false,
       "tensorflowLogs": false,
       "memoryTracking": false,
-      "performanceProfiling": false
+      "performanceProfiling": false,
+      "trainingDebug": false
     },
     "testing": {
       "enabled": true,
       "mockData": false,
       "unitTests": true,
       "integrationTests": true,
-      "performanceTests": false
+      "performanceTests": false,
+      "trainingTests": true
     },
     "optimization": {
       "memoryManagement": true,
       "tensorDisposal": true,
       "garbageCollection": true,
-      "batchOptimization": true
+      "batchOptimization": true,
+      "trainingOptimization": true
     }
   }
 }
