@@ -45,7 +45,7 @@ class MLServer {
         
         // Create training queue AFTER everything is initialized
         this.initializeTrainingQueue();
-        
+        this.initializePeriodicTraining();
         this.setupRoutes();
         this.setupMiddleware();
     }
@@ -113,6 +113,307 @@ class MLServer {
                 shutdown: () => Promise.resolve()
             };
         }
+    }
+
+    initializePeriodicTraining() {
+    try {
+        const periodicConfig = config.get('ml.training');
+        
+        if (!periodicConfig.periodicTraining) {
+            Logger.info('Periodic training disabled in configuration');
+            this.periodicTrainingEnabled = false;
+            return;
+        }
+        
+        this.periodicTrainingEnabled = true;
+        this.periodicTrainingInterval = periodicConfig.periodicInterval || 3600000; // 1 hour default
+        this.periodicTrainingConfig = {
+            epochs: periodicConfig.periodicEpochs || 15,
+            batchSize: periodicConfig.periodicTrainingConfig?.batchSize || 32,
+            verbose: 0,
+            priority: 5, // Lower priority than manual training
+            maxAttempts: 1,
+            source: 'periodic',
+            ...periodicConfig.periodicTrainingConfig
+        };
+        
+        // Start periodic training after service is fully initialized
+        setTimeout(() => {
+            this.startPeriodicTraining();
+        }, 60000); // 1 minute delay to ensure everything is ready
+        
+        Logger.info('Periodic training initialized for ALL ENSEMBLE MODELS', {
+            enabled: this.periodicTrainingEnabled,
+            interval: this.periodicTrainingInterval / 1000 / 60 + ' minutes',
+            modelsToTrain: this.enabledModels,
+            config: this.periodicTrainingConfig
+        });
+        
+    } catch (error) {
+        Logger.error('Failed to initialize periodic training', { error: error.message });
+        this.periodicTrainingEnabled = false;
+    }
+}
+
+    startPeriodicTraining() {
+        if (!this.periodicTrainingEnabled) {
+            Logger.info('Periodic training not enabled, skipping start');
+            return;
+        }
+        
+        if (this.periodicTrainingTimer) {
+            clearInterval(this.periodicTrainingTimer);
+        }
+        
+        // Set up the periodic timer
+        this.periodicTrainingTimer = setInterval(async () => {
+            try {
+                await this.performPeriodicTraining();
+            } catch (error) {
+                Logger.error('Periodic training cycle failed', { error: error.message });
+            }
+        }, this.periodicTrainingInterval);
+        
+        Logger.info('🔄 Periodic training started - ALL ENSEMBLE MODELS will be trained', {
+            interval: this.periodicTrainingInterval / 1000 / 60 + ' minutes',
+            modelsPerCycle: this.enabledModels.length,
+            nextTraining: new Date(Date.now() + this.periodicTrainingInterval).toLocaleString()
+        });
+        
+        // Optional: Run first training cycle after a short delay
+        setTimeout(async () => {
+            Logger.info('🚀 Running initial periodic training cycle...');
+            try {
+                await this.performPeriodicTraining();
+            } catch (error) {
+                Logger.error('Initial periodic training failed', { error: error.message });
+            }
+        }, 300000); // 5 minutes after startup
+    }
+
+    async performPeriodicTraining() {
+        if (!this.periodicTrainingEnabled) {
+            Logger.debug('Periodic training disabled, skipping cycle');
+            return;
+        }
+        
+        const cycleStart = Date.now();
+        Logger.info('🔄 Starting periodic training cycle for ALL ENSEMBLE MODELS', {
+            enabledModels: this.enabledModels,
+            timestamp: new Date().toLocaleString()
+        });
+        
+        try {
+            // Get all active trading pairs
+            const activePairs = await this.getActiveTradingPairs();
+            
+            if (activePairs.length === 0) {
+                Logger.info('No active trading pairs found for periodic training');
+                return;
+            }
+            
+            Logger.info(`📊 Periodic training cycle for ${activePairs.length} pairs: ${activePairs.join(', ')}`);
+            
+            let totalQueued = 0;
+            let totalSkipped = 0;
+            let totalFailed = 0;
+            const results = [];
+            
+            // Train ALL enabled models for each active pair
+            for (const pair of activePairs) {
+                const pairResults = {
+                    pair: pair,
+                    models: {}
+                };
+                
+                for (const modelType of this.enabledModels) {
+                    try {
+                        // Check if we can train this model (respects cooldowns)
+                        const canTrain = this.trainingQueue.canTrain(pair, modelType);
+                        
+                        if (!canTrain.allowed) {
+                            Logger.debug(`Skipping periodic training for ${pair}:${modelType}`, {
+                                reason: canTrain.reason,
+                                cooldownRemaining: canTrain.cooldownRemainingMinutes
+                            });
+                            totalSkipped++;
+                            pairResults.models[modelType] = {
+                                status: 'skipped',
+                                reason: canTrain.reason
+                            };
+                            continue;
+                        }
+                        
+                        // Queue periodic training job
+                        const jobId = await this.trainingQueue.addTrainingJob(
+                            pair,
+                            modelType,
+                            this.performModelTraining.bind(this),
+                            this.periodicTrainingConfig
+                        );
+                        
+                        Logger.info(`✅ Periodic training queued: ${pair}:${modelType}`, { jobId });
+                        totalQueued++;
+                        pairResults.models[modelType] = {
+                            status: 'queued',
+                            jobId: jobId
+                        };
+                        
+                    } catch (error) {
+                        Logger.warn(`❌ Failed to queue periodic training for ${pair}:${modelType}`, { 
+                            error: error.message 
+                        });
+                        totalFailed++;
+                        pairResults.models[modelType] = {
+                            status: 'failed',
+                            error: error.message
+                        };
+                    }
+                }
+                
+                results.push(pairResults);
+            }
+            
+            const cycleDuration = Date.now() - cycleStart;
+            const nextCycle = new Date(Date.now() + this.periodicTrainingInterval);
+            
+            Logger.info('🎯 Periodic training cycle completed', {
+                duration: Math.round(cycleDuration / 1000) + 's',
+                pairs: activePairs.length,
+                totalModelsAttempted: activePairs.length * this.enabledModels.length,
+                totalQueued,
+                totalSkipped,
+                totalFailed,
+                nextCycle: nextCycle.toLocaleString(),
+                results: results
+            });
+            
+            // Get current queue status
+            try {
+                const queueStatus = this.trainingQueue.getQueueStatus();
+                Logger.info('📊 Training queue status after periodic cycle', {
+                    activeJobs: queueStatus.active.count,
+                    queuedJobs: queueStatus.queued.count,
+                    totalJobs: queueStatus.active.count + queueStatus.queued.count
+                });
+            } catch (error) {
+                Logger.warn('Failed to get queue status', { error: error.message });
+            }
+            
+        } catch (error) {
+            Logger.error('Periodic training cycle failed', { 
+                error: error.message,
+                duration: Math.round((Date.now() - cycleStart) / 1000) + 's'
+            });
+        }
+    }
+
+    async getActiveTradingPairs() {
+        const activePairs = new Set();
+        
+        try {
+            // Method 1: Get pairs from core service configuration
+            const coreResponse = await this.dataClient.checkCoreHealth();
+            if (coreResponse) {
+                try {
+                    // Try to get config from core
+                    const configUrl = `${this.dataClient.baseUrl}/api/config`;
+                    const response = await require('axios').get(configUrl, { timeout: 10000 });
+                    if (response.data.config && response.data.config.pairs) {
+                        response.data.config.pairs.forEach(pair => activePairs.add(pair.toUpperCase()));
+                        Logger.debug('Got pairs from core config', { pairs: response.data.config.pairs });
+                    }
+                } catch (error) {
+                    Logger.debug('Could not get pairs from core config', { error: error.message });
+                }
+            }
+        } catch (error) {
+            Logger.debug('Core service not available for pair discovery', { error: error.message });
+        }
+        
+        try {
+            // Method 2: Get pairs from our feature counts (recently accessed pairs)
+            const recentPairs = Object.keys(this.featureCounts);
+            recentPairs.forEach(pair => activePairs.add(pair.toUpperCase()));
+            if (recentPairs.length > 0) {
+                Logger.debug('Got pairs from feature counts', { pairs: recentPairs });
+            }
+        } catch (error) {
+            Logger.debug('Could not get pairs from feature counts', { error: error.message });
+        }
+        
+        try {
+            // Method 3: Get pairs from existing models
+            const modelPairs = Object.keys(this.models);
+            modelPairs.forEach(pair => activePairs.add(pair.toUpperCase()));
+            if (modelPairs.length > 0) {
+                Logger.debug('Got pairs from existing models', { pairs: modelPairs });
+            }
+        } catch (error) {
+            Logger.debug('Could not get pairs from models', { error: error.message });
+        }
+        
+        try {
+            // Method 4: Get pairs from ensemble models
+            const ensemblePairs = Object.keys(this.ensembles);
+            ensemblePairs.forEach(pair => activePairs.add(pair.toUpperCase()));
+            if (ensemblePairs.length > 0) {
+                Logger.debug('Got pairs from ensembles', { pairs: ensemblePairs });
+            }
+        } catch (error) {
+            Logger.debug('Could not get pairs from ensembles', { error: error.message });
+        }
+        
+        // Convert to array and filter out any invalid pairs
+        const pairsArray = Array.from(activePairs).filter(pair => 
+            pair && typeof pair === 'string' && pair.length >= 2
+        );
+        
+        // If no pairs found, use fallback pairs
+        if (pairsArray.length === 0) {
+            const fallbackPairs = ['BTC', 'ETH', 'XMR', 'RVN'];
+            Logger.info('No active pairs found, using fallback pairs', { fallbackPairs });
+            return fallbackPairs;
+        }
+        
+        Logger.debug('Active trading pairs discovered', { 
+            count: pairsArray.length,
+            pairs: pairsArray 
+        });
+        
+        return pairsArray;
+    }
+
+    stopPeriodicTraining() {
+        if (this.periodicTrainingTimer) {
+            clearInterval(this.periodicTrainingTimer);
+            this.periodicTrainingTimer = null;
+            Logger.info('🛑 Periodic training stopped');
+        }
+        this.periodicTrainingEnabled = false;
+    }
+
+    // Add periodic training status to health endpoint
+    getPeriodicTrainingStatus() {
+        if (!this.periodicTrainingEnabled) {
+            return {
+                enabled: false,
+                status: 'disabled'
+            };
+        }
+        
+        const nextTraining = this.periodicTrainingTimer ? 
+            new Date(Date.now() + this.periodicTrainingInterval) : null;
+        
+        return {
+            enabled: true,
+            status: this.periodicTrainingTimer ? 'active' : 'inactive',
+            interval: this.periodicTrainingInterval,
+            intervalMinutes: this.periodicTrainingInterval / 1000 / 60,
+            nextTraining: nextTraining ? nextTraining.toISOString() : null,
+            config: this.periodicTrainingConfig,
+            modelsToTrain: this.enabledModels
+        };
     }
 
     setupMiddleware() {
@@ -194,7 +495,8 @@ class MLServer {
                         cacheHits: this.getCacheHitRate(),
                         avgResponseTime: this.getAverageResponseTime(),
                         cacheTimeout: this.cacheTimeout
-                    }
+                    },
+                    periodicTraining: this.getPeriodicTrainingStatus(),
                 };
                 
                 // Try core health check in background (non-blocking)
@@ -734,6 +1036,76 @@ class MLServer {
                 timestamp: Date.now()
             });
         });
+        // Get periodic training status
+        this.app.get('/api/training/periodic/status', (req, res) => {
+            try {
+                const status = this.getPeriodicTrainingStatus();
+                res.json({
+                    periodicTraining: status,
+                    timestamp: Date.now()
+                });
+            } catch (error) {
+                Logger.error('Failed to get periodic training status', { error: error.message });
+                res.status(500).json({
+                    error: 'Failed to get periodic training status',
+                    message: error.message
+                });
+            }
+        });
+
+        // Enable/disable periodic training
+        this.app.post('/api/training/periodic/toggle', (req, res) => {
+            try {
+                const { enabled } = req.body;
+                
+                if (enabled && !this.periodicTrainingEnabled) {
+                    this.periodicTrainingEnabled = true;
+                    this.startPeriodicTraining();
+                    Logger.info('Periodic training enabled via API');
+                } else if (!enabled && this.periodicTrainingEnabled) {
+                    this.stopPeriodicTraining();
+                    Logger.info('Periodic training disabled via API');
+                }
+                
+                res.json({
+                    message: `Periodic training ${enabled ? 'enabled' : 'disabled'}`,
+                    status: this.getPeriodicTrainingStatus(),
+                    timestamp: Date.now()
+                });
+                
+            } catch (error) {
+                Logger.error('Failed to toggle periodic training', { error: error.message });
+                res.status(500).json({
+                    error: 'Failed to toggle periodic training',
+                    message: error.message
+                });
+            }
+        });
+
+        // Force run periodic training cycle now
+        this.app.post('/api/training/periodic/run-now', async (req, res) => {
+            try {
+                Logger.info('Manual periodic training cycle requested via API');
+                
+                // Run periodic training in background
+                this.performPeriodicTraining().catch(error => {
+                    Logger.error('Manual periodic training failed', { error: error.message });
+                });
+                
+                res.json({
+                    message: 'Periodic training cycle started',
+                    status: this.getPeriodicTrainingStatus(),
+                    timestamp: Date.now()
+                });
+                
+            } catch (error) {
+                Logger.error('Failed to start manual periodic training', { error: error.message });
+                res.status(500).json({
+                    error: 'Failed to start periodic training',
+                    message: error.message
+                });
+            }
+        });
     }
     
     // Training function that will be called by the queue manager
@@ -799,7 +1171,7 @@ class MLServer {
                 modelType: modelType,
                 status: 'completed',
                 finalMetrics: history.finalMetrics,
-                epochsCompleted: history.epochsCompleted || history.finalMetrics.epochsCompleted,
+                epochsCompleted: history.epochsCompleted || history.finalMetrics?.epochsCompleted || history.epoch?.length || 0,
                 featureCount: currentFeatureCount,
                 timestamp: Date.now()
             };
@@ -1386,6 +1758,8 @@ class MLServer {
     async stop() {
         Logger.info('Stopping Ensemble ML Server...');
         
+        this.stopPeriodicTraining();
+
         // Stop training queue first
         if (this.trainingQueue) {
             await this.trainingQueue.shutdown();
