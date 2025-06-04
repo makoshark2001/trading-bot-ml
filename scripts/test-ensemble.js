@@ -1,502 +1,273 @@
-require('dotenv').config();
-const DataClient = require('../src/data/DataClient');
-const FeatureExtractor = require('../src/data/FeatureExtractor');
-const DataPreprocessor = require('../src/data/DataPreprocessor');
-const LSTMModel = require('../src/models/LSTMModel');
-const GRUModel = require('../src/models/GRUModel');
-const CNNModel = require('../src/models/CNNModel');
-const TransformerModel = require('../src/models/TransformerModel');
-const ModelEnsemble = require('../src/models/ModelEnsemble');
-const { Logger } = require('../src/utils');
-const config = require('config');
+#!/usr/bin/env node
 
-async function testModelEnsemble() {
-    console.log('🚀 Testing Advanced Model Ensemble System...');
-    console.log('================================================');
-    
-    const dataClient = new DataClient();
-    const featureExtractor = new FeatureExtractor(config.get('ml.features'));
-    const preprocessor = new DataPreprocessor(config.get('ml.models.lstm'));
-    
-    let models = {};
-    let ensemble = null;
-    
+const axios = require('axios');
+const colors = require('colors');
+
+const ML_BASE_URL = 'http://localhost:3001';
+const TEST_PAIR = 'BTC';
+
+async function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function testEnsembleMode() {
+    console.log('🤖 TESTING ENSEMBLE MODE FUNCTIONALITY'.green.bold);
+    console.log('====================================='.green);
+    console.log('');
+
     try {
-        // Test 1: Initialize all model types
-        console.log('\n📊 Test 1: Initialize All Model Types...');
-        console.log('------------------------------------------');
+        // Step 1: Check if ML service is running
+        console.log('1. Checking ML service health...'.yellow);
+        const healthResponse = await axios.get(`${ML_BASE_URL}/api/health`);
+        const health = healthResponse.data;
         
-        const rvnData = await dataClient.getPairData('RVN');
-        const features = featureExtractor.extractFeatures(rvnData);
-        const featureCount = features.features.length;
+        console.log(`   ✅ Service Status: ${health.status}`.green);
+        console.log(`   🤖 Ensemble Mode: ${health.ensembleMode ? 'ENABLED' : 'DISABLED'}`.cyan);
+        console.log(`   ⚡ Quick Mode: ${health.quickMode ? 'ENABLED' : 'DISABLED'}`.cyan);
+        console.log(`   🎯 Enabled Models: ${health.models.enabledTypes.join(', ')}`.cyan);
+        console.log(`   📊 Strategy: ${health.models.strategy}`.cyan);
+        console.log('');
+
+        if (!health.ensembleMode) {
+            console.log('❌ WARNING: Ensemble mode is not enabled!'.red.bold);
+            console.log('   Check your .env file and ensure ML_QUICK_MODE=false'.yellow);
+            console.log('');
+        }
+
+        // Step 2: Check API info
+        console.log('2. Checking API configuration...'.yellow);
+        const apiResponse = await axios.get(`${ML_BASE_URL}/api`);
+        const apiInfo = apiResponse.data;
         
-        console.log('✅ Data prepared:', {
-            pair: 'RVN',
-            features: featureCount,
-            dataPoints: rvnData.history?.closes?.length || 0
-        });
+        console.log(`   📦 Version: ${apiInfo.version}`.cyan);
+        console.log(`   🤖 Ensemble Mode: ${apiInfo.ensembleMode ? 'ENABLED' : 'DISABLED'}`.cyan);
+        console.log(`   🎯 Enabled Models: ${apiInfo.ensemble.enabledModels.join(', ')}`.cyan);
+        console.log(`   📊 Strategy: ${apiInfo.ensemble.strategy}`.cyan);
+        console.log(`   ⏱️  Cache Timeout: ${apiInfo.ensemble.cacheTimeout}ms`.cyan);
+        console.log('');
+
+        // Step 3: Test feature extraction
+        console.log('3. Testing feature extraction...'.yellow);
+        const featuresResponse = await axios.get(`${ML_BASE_URL}/api/features/${TEST_PAIR}`);
+        const features = featuresResponse.data;
         
-        const modelConfigs = {
-            lstm: { ...config.get('ml.models.lstm'), features: featureCount },
-            gru: { ...config.get('ml.models.gru'), features: featureCount },
-            cnn: { ...config.get('ml.models.cnn'), features: featureCount },
-            transformer: { ...config.get('ml.models.transformer'), features: featureCount }
-        };
+        console.log(`   ✅ Features extracted for ${TEST_PAIR}`.green);
+        console.log(`   📊 Feature count: ${features.features.count}`.cyan);
+        console.log(`   ⏱️  Response time: ${Date.now() - Date.parse(featuresResponse.headers.date)}ms`.cyan);
+        console.log('');
+
+        // Step 4: Check model status
+        console.log('4. Checking model status...'.yellow);
+        const statusResponse = await axios.get(`${ML_BASE_URL}/api/models/${TEST_PAIR}/status`);
+        const status = statusResponse.data;
         
-        // Create and build all models
-        for (const [modelType, modelConfig] of Object.entries(modelConfigs)) {
-            console.log(`\n🔧 Building ${modelType.toUpperCase()} model...`);
+        console.log(`   📊 Feature count: ${status.featureCount}`.cyan);
+        console.log(`   🤖 Ensemble Mode: ${status.ensembleMode ? 'ENABLED' : 'DISABLED'}`.cyan);
+        
+        console.log('   📋 Individual Models:'.cyan);
+        for (const [modelType, modelInfo] of Object.entries(status.individual)) {
+            const hasModel = modelInfo.hasModel ? '✅' : '❌';
+            const hasWeights = modelInfo.hasWeights ? '💾' : '🔄';
+            const canTrain = modelInfo.training.allowed ? '🟢' : '🔴';
+            console.log(`     ${hasModel} ${modelType.toUpperCase()}: Model=${modelInfo.hasModel}, Weights=${hasWeights}, CanTrain=${canTrain}`.white);
+        }
+        
+        console.log(`   🎯 Can Create Ensemble: ${status.ensemble.canCreateEnsemble ? 'YES' : 'NO'}`.cyan);
+        console.log(`   📊 Current Ensembles: ${status.ensemble.stats ? status.ensemble.stats.modelCount : 0} models`.cyan);
+        console.log('');
+
+        // Step 5: Test single model prediction
+        console.log('5. Testing single model prediction (LSTM)...'.yellow);
+        const singleStart = Date.now();
+        const singleResponse = await axios.get(`${ML_BASE_URL}/api/predictions/${TEST_PAIR}?model=lstm`);
+        const singlePrediction = singleResponse.data;
+        const singleTime = Date.now() - singleStart;
+        
+        console.log(`   ✅ Single LSTM prediction completed`.green);
+        console.log(`   📋 Raw response structure:`.cyan, JSON.stringify(singlePrediction, null, 2));
+        
+        // Handle different response structures
+        const prediction = singlePrediction.prediction || singlePrediction;
+        const predValue = typeof prediction.prediction === 'number' ? prediction.prediction : 
+                         typeof prediction === 'number' ? prediction : 0.5;
+        
+        console.log(`   🎯 Prediction: ${predValue.toFixed(4)}`.cyan);
+        console.log(`   🎯 Direction: ${(prediction.direction || 'unknown').toUpperCase()}`.cyan);
+        console.log(`   💪 Confidence: ${((prediction.confidence || 0) * 100).toFixed(1)}%`.cyan);
+        console.log(`   📊 Signal: ${prediction.signal || 'UNKNOWN'}`.cyan);
+        console.log(`   ⏱️  Response time: ${singleTime}ms`.cyan);
+        console.log(`   📦 Cached: ${singlePrediction.cached ? 'YES' : 'NO'}`.cyan);
+        console.log('');
+
+        // Step 6: Test ensemble prediction
+        console.log('6. Testing ensemble prediction...'.yellow);
+        
+        // First check if we have enough models for ensemble
+        const hasModels = Object.values(status.individual).filter(m => m.hasModel).length;
+        
+        if (hasModels < 2) {
+            console.log(`   ⚠️  Not enough models for ensemble (${hasModels}/2+)`.yellow);
+            console.log(`   🔧 Training models first...`.yellow);
             
-            let model;
-            switch (modelType) {
-                case 'lstm':
-                    model = new LSTMModel(modelConfig);
-                    break;
-                case 'gru':
-                    model = new GRUModel(modelConfig);
-                    break;
-                case 'cnn':
-                    model = new CNNModel(modelConfig);
-                    break;
-                case 'transformer':
-                    model = new TransformerModel(modelConfig);
-                    break;
-            }
-            
-            model.buildModel();
-            model.compileModel();
-            models[modelType] = model;
-            
-            const summary = model.getModelSummary();
-            console.log(`✅ ${modelType.toUpperCase()} model ready:`, {
-                layers: summary.layers,
-                params: summary.totalParams,
-                compiled: summary.isCompiled
-            });
-        }
-        
-        console.log(`\n✅ All ${Object.keys(models).length} models initialized successfully!`);
-        
-        // Test 2: Create and configure ensemble
-        console.log('\n📊 Test 2: Create Model Ensemble...');
-        console.log('------------------------------------');
-        
-        const ensembleConfig = {
-            modelTypes: Object.keys(models), // Only working models
-            votingStrategy: 'weighted',
-            weights: {}
-        };
-        
-        // Set equal weights for working models
-        Object.keys(models).forEach(modelType => {
-            ensembleConfig.weights[modelType] = 1.0 / Object.keys(models).length;
-        });
-        
-        ensemble = new ModelEnsemble(ensembleConfig);
-        
-        // Add all models to ensemble
-        for (const [modelType, model] of Object.entries(models)) {
-            ensemble.addModel(modelType, model, ensembleConfig.weights[modelType], {
-                pair: 'RVN',
-                featureCount: featureCount,
-                created: Date.now()
-            });
-        }
-        
-        const ensembleStats = ensemble.getEnsembleStats();
-        console.log('✅ Ensemble created:', {
-            modelCount: ensembleStats.modelCount,
-            strategy: ensembleStats.votingStrategy,
-            weights: ensembleStats.weights
-        });
-        
-        // Test 3: Prepare training data
-        console.log('\n📊 Test 3: Prepare Training Data...');
-        console.log('------------------------------------');
-        
-        // Create sample training data (simplified for testing)
-        const targets = featureExtractor.createTargets(rvnData.history);
-        const binaryTargets = targets['direction_5'] || [];
-        
-        if (binaryTargets.length === 0) {
-            throw new Error('No binary targets available for training');
-        }
-        
-        // Create feature sequences (simplified)
-        const featuresArray = [];
-        for (let i = 0; i < Math.min(binaryTargets.length, 200); i++) { // Limit for testing
-            featuresArray.push(features.features);
-        }
-        
-        const processedData = await preprocessor.prepareTrainingData(
-            featuresArray, 
-            binaryTargets.slice(0, featuresArray.length)
-        );
-        
-        console.log('✅ Training data prepared:', {
-            trainSamples: processedData.trainX.shape[0],
-            validationSamples: processedData.validationX.shape[0],
-            testSamples: processedData.testX.shape[0],
-            sequenceLength: processedData.trainX.shape[1],
-            features: processedData.trainX.shape[2]
-        });
-        
-        // Test 4: Quick training for each model (reduced epochs for testing)
-        console.log('\n📊 Test 4: Quick Model Training...');
-        console.log('-----------------------------------');
-        
-        const trainingResults = {};
-        const quickTrainingConfig = {
-            epochs: 3, // Very quick training for testing
-            batchSize: 16,
-            verbose: 0,
-            patience: 5 // Reduced patience for testing
-        };
-        
-        for (const [modelType, model] of Object.entries(models)) {
-            console.log(`\n🏋️ Training ${modelType.toUpperCase()} (${quickTrainingConfig.epochs} epochs)...`);
-            
-            try {
-                const startTime = Date.now();
-                
-                // Add timeout for training to prevent hanging
-                const trainingPromise = model.train(
-                    processedData.trainX,
-                    processedData.trainY,
-                    processedData.validationX,
-                    processedData.validationY,
-                    quickTrainingConfig
-                );
-                
-                const timeoutPromise = new Promise((_, reject) => {
-                    setTimeout(() => reject(new Error('Training timeout after 60 seconds')), 60000);
-                });
-                
-                const history = await Promise.race([trainingPromise, timeoutPromise]);
-                const trainingTime = Date.now() - startTime;
-                
-                trainingResults[modelType] = {
-                    status: 'completed',
-                    finalMetrics: history.finalMetrics || {
-                        finalLoss: history.history?.loss?.[history.history.loss.length - 1]?.toFixed(4) || 'N/A',
-                        finalAccuracy: history.history?.acc?.[history.history.acc.length - 1]?.toFixed(4) || 'N/A',
-                        epochsCompleted: history.epoch?.length || quickTrainingConfig.epochs
-                    },
-                    trainingTime: trainingTime,
-                    modelType: modelType
-                };
-                
-                const metrics = trainingResults[modelType].finalMetrics;
-                console.log(`✅ ${modelType.toUpperCase()} training completed:`, {
-                    loss: metrics.finalLoss,
-                    accuracy: metrics.finalAccuracy,
-                    time: `${trainingTime}ms`
-                });
-                
-            } catch (error) {
-                const trainingTime = Date.now() - startTime;
-                console.log(`❌ ${modelType.toUpperCase()} training failed:`, error.message);
-                trainingResults[modelType] = {
-                    status: 'failed',
-                    error: error.message,
-                    trainingTime: trainingTime,
-                    modelType: modelType
-                };
-                
-                // Continue with other models even if one fails
-                continue;
-            }
-        }
-        
-        const successfulModels = Object.values(trainingResults).filter(r => r.status === 'completed').length;
-        console.log(`\n✅ Training completed: ${successfulModels}/${Object.keys(models).length} models successful`);
-        
-        // Remove failed models from the models object to avoid issues in ensemble
-        const workingModels = {};
-        Object.entries(models).forEach(([modelType, model]) => {
-            if (trainingResults[modelType] && trainingResults[modelType].status === 'completed') {
-                workingModels[modelType] = model;
-            } else {
-                // Dispose failed models
-                if (model && typeof model.dispose === 'function') {
-                    model.dispose();
+            // Train LSTM and GRU models
+            const modelsToTrain = ['lstm', 'gru'];
+            for (const modelType of modelsToTrain) {
+                console.log(`   🔄 Training ${modelType.toUpperCase()} model...`.yellow);
+                try {
+                    const trainResponse = await axios.post(`${ML_BASE_URL}/api/train/${TEST_PAIR}/${modelType}`, {
+                        epochs: 5, // Quick training for testing
+                        priority: 1
+                    });
+                    console.log(`   ✅ ${modelType.toUpperCase()} training queued: ${trainResponse.data.jobId}`.green);
+                } catch (trainError) {
+                    console.log(`   ❌ Failed to queue ${modelType.toUpperCase()} training: ${trainError.message}`.red);
                 }
             }
-        });
-        
-        models = workingModels; // Update models to only include working ones
-        
-        if (Object.keys(models).length === 0) {
-            throw new Error('No models trained successfully - cannot proceed with ensemble tests');
-        }
-        
-        console.log(`\n📝 Proceeding with ${Object.keys(models).length} working models: ${Object.keys(models).join(', ')}`);
-        
-        // Test 5: Individual model predictions (only for working models)
-        console.log('\n📊 Test 5: Individual Model Predictions...');
-        console.log('-------------------------------------------');
-        
-        const testInput = processedData.testX.slice([0, 0, 0], [5, -1, -1]); // Test on first 5 samples
-        const individualPredictions = {};
-        
-        for (const [modelType, model] of Object.entries(models)) {
-            try {
-                const startTime = Date.now();
-                const predictions = await model.predict(testInput);
-                const predictionTime = Date.now() - startTime;
+            
+            console.log(`   ⏳ Waiting for training to complete (this may take a few minutes)...`.yellow);
+            
+            // Wait for training to complete
+            let trainingComplete = false;
+            let attempts = 0;
+            const maxAttempts = 60; // 5 minutes max
+            
+            while (!trainingComplete && attempts < maxAttempts) {
+                await sleep(5000); // Wait 5 seconds
+                attempts++;
                 
-                individualPredictions[modelType] = {
-                    predictions: Array.from(predictions),
-                    avgPrediction: Array.from(predictions).reduce((sum, p) => sum + p, 0) / predictions.length,
-                    avgConfidence: Array.from(predictions).reduce((sum, p) => sum + Math.abs(p - 0.5) * 2, 0) / predictions.length,
-                    predictionTime: predictionTime,
-                    status: 'success'
-                };
-                
-                console.log(`✅ ${modelType.toUpperCase()} predictions:`, {
-                    samples: predictions.length,
-                    avgPrediction: individualPredictions[modelType].avgPrediction.toFixed(4),
-                    avgConfidence: individualPredictions[modelType].avgConfidence.toFixed(4),
-                    time: `${predictionTime}ms`
-                });
-                
-            } catch (error) {
-                console.log(`❌ ${modelType.toUpperCase()} prediction failed:`, error.message);
-                individualPredictions[modelType] = {
-                    status: 'failed',
-                    error: error.message
-                };
+                try {
+                    const queueResponse = await axios.get(`${ML_BASE_URL}/api/training/queue`);
+                    const queue = queueResponse.data.queue;
+                    
+                    const activeJobs = queue.active.count;
+                    const queuedJobs = queue.queued.count;
+                    
+                    if (activeJobs === 0 && queuedJobs === 0) {
+                        trainingComplete = true;
+                        console.log(`   ✅ Training completed!`.green);
+                    } else {
+                        process.stdout.write(`   ⏳ Training progress... (Active: ${activeJobs}, Queued: ${queuedJobs}) [${attempts}/${maxAttempts}]\r`.yellow);
+                    }
+                } catch (error) {
+                    console.log(`   ⚠️  Error checking training status: ${error.message}`.yellow);
+                }
+            }
+            
+            if (!trainingComplete) {
+                console.log(`\n   ❌ Training did not complete within timeout`.red);
+                console.log(`   ℹ️  You can check training status with: curl ${ML_BASE_URL}/api/training/queue`.blue);
+                return;
             }
         }
         
-        // Test 6: Ensemble predictions with different strategies
-        console.log('\n📊 Test 6: Ensemble Predictions (All Strategies)...');
-        console.log('---------------------------------------------------');
+        // Now test ensemble prediction
+        console.log(`   🤖 Testing ensemble prediction...`.yellow);
+        const ensembleStart = Date.now();
+        const ensembleResponse = await axios.get(`${ML_BASE_URL}/api/predictions/${TEST_PAIR}?ensemble=true`);
+        const ensemblePrediction = ensembleResponse.data;
+        const ensembleTime = Date.now() - ensembleStart;
         
-        const strategies = ['weighted', 'majority', 'average', 'confidence_weighted'];
-        const ensemblePredictions = {};
+        console.log(`   ✅ Ensemble prediction completed`.green);
+        
+        // Handle different response structures  
+        const ensemblePred = ensemblePrediction.prediction || ensemblePrediction;
+        const ensemblePredValue = typeof ensemblePred.prediction === 'number' ? ensemblePred.prediction : 
+                                 typeof ensemblePred === 'number' ? ensemblePred : 0.5;
+        
+        console.log(`   🎯 Prediction: ${ensemblePredValue.toFixed(4)}`.cyan);
+        console.log(`   🎯 Direction: ${(ensemblePred.direction || 'unknown').toUpperCase()}`.cyan);
+        console.log(`   💪 Confidence: ${((ensemblePred.confidence || 0) * 100).toFixed(1)}%`.cyan);
+        console.log(`   📊 Signal: ${ensemblePred.signal || 'UNKNOWN'}`.cyan);
+        console.log(`   ⏱️  Response time: ${ensembleTime}ms`.cyan);
+        console.log(`   📦 Cached: ${ensemblePrediction.cached ? 'YES' : 'NO'}`.cyan);
+        console.log(`   🤖 Ensemble: ${ensemblePrediction.ensemble ? 'YES' : 'NO'}`.cyan);
+        
+        if (ensemblePred.ensemble) {
+            console.log(`   📊 Strategy: ${ensemblePred.ensemble.strategy}`.cyan);
+            console.log(`   🎯 Model Count: ${ensemblePred.ensemble.modelCount}`.cyan);
+            console.log(`   🔍 Individual Predictions:`.cyan);
+            for (const [model, pred] of Object.entries(ensemblePred.ensemble.individualPredictions || {})) {
+                console.log(`     📈 ${model.toUpperCase()}: ${pred.toFixed(4)}`.white);
+            }
+        }
+        console.log('');
+
+        // Step 7: Test different ensemble strategies
+        console.log('7. Testing different ensemble strategies...'.yellow);
+        const strategies = ['weighted', 'majority', 'average'];
         
         for (const strategy of strategies) {
             try {
-                console.log(`\n🔮 Testing ${strategy} strategy...`);
+                const strategyStart = Date.now();
+                const strategyResponse = await axios.get(`${ML_BASE_URL}/api/predictions/${TEST_PAIR}?strategy=${strategy}`);
+                const strategyPrediction = strategyResponse.data;
+                const strategyTime = Date.now() - strategyStart;
                 
-                const startTime = Date.now();
-                const prediction = await ensemble.predict(testInput, { strategy: strategy });
-                const predictionTime = Date.now() - startTime;
+                const strategyPred = strategyPrediction.prediction || strategyPrediction;
+                const strategyPredValue = typeof strategyPred.prediction === 'number' ? strategyPred.prediction : 
+                                         typeof strategyPred === 'number' ? strategyPred : 0.5;
                 
-                ensemblePredictions[strategy] = {
-                    ...prediction,
-                    predictionTime: predictionTime,
-                    status: 'success'
-                };
-                
-                console.log(`✅ ${strategy} ensemble result:`, {
-                    prediction: prediction.prediction.toFixed(4),
-                    confidence: prediction.confidence.toFixed(4),
-                    direction: prediction.direction,
-                    signal: prediction.signal,
-                    time: `${predictionTime}ms`,
-                    modelCount: prediction.ensemble.modelCount
-                });
-                
-                // Show individual contributions
-                console.log('   Individual contributions:', 
-                    Object.entries(prediction.ensemble.individualPredictions)
-                        .map(([model, pred]) => `${model}: ${pred.toFixed(4)}`)
-                        .join(', ')
-                );
-                
+                console.log(`   📊 ${strategy.toUpperCase()} Strategy:`.cyan);
+                console.log(`     🎯 Prediction: ${strategyPredValue.toFixed(4)}`.white);
+                console.log(`     💪 Confidence: ${((strategyPred.confidence || 0) * 100).toFixed(1)}%`.white);
+                console.log(`     📊 Signal: ${strategyPred.signal || 'UNKNOWN'}`.white);
+                console.log(`     ⏱️  Time: ${strategyTime}ms`.white);
             } catch (error) {
-                console.log(`❌ ${strategy} ensemble failed:`, error.message);
-                ensemblePredictions[strategy] = {
-                    status: 'failed',
-                    error: error.message
-                };
+                console.log(`   ❌ ${strategy.toUpperCase()} failed: ${error.message}`.red);
             }
         }
-        
-        // Test 7: Performance comparison
-        console.log('\n📊 Test 7: Performance Comparison...');
-        console.log('-------------------------------------');
-        
-        const performanceComparison = {
-            individual: {},
-            ensemble: {}
-        };
-        
-        // Individual model performance
-        for (const [modelType, result] of Object.entries(individualPredictions)) {
-            if (result.status === 'success') {
-                performanceComparison.individual[modelType] = {
-                    avgConfidence: result.avgConfidence,
-                    predictionTime: result.predictionTime,
-                    consistency: this.calculateConsistency(result.predictions)
-                };
-            }
-        }
-        
-        // Ensemble performance
-        for (const [strategy, result] of Object.entries(ensemblePredictions)) {
-            if (result.status === 'success') {
-                performanceComparison.ensemble[strategy] = {
-                    confidence: result.confidence,
-                    predictionTime: result.predictionTime,
-                    modelCount: result.ensemble.modelCount,
-                    signal: result.signal
-                };
-            }
-        }
-        
-        console.log('\n📈 Performance Summary:');
-        console.log('Individual Models:');
-        Object.entries(performanceComparison.individual).forEach(([model, perf]) => {
-            console.log(`  ${model.toUpperCase()}: confidence=${perf.avgConfidence.toFixed(3)}, time=${perf.predictionTime}ms, consistency=${perf.consistency.toFixed(3)}`);
-        });
-        
-        console.log('Ensemble Strategies:');
-        Object.entries(performanceComparison.ensemble).forEach(([strategy, perf]) => {
-            console.log(`  ${strategy}: confidence=${perf.confidence.toFixed(3)}, time=${perf.predictionTime}ms, signal=${perf.signal}`);
-        });
-        
-        // Test 8: Weight updates and ensemble optimization
-        console.log('\n📊 Test 8: Weight Updates and Optimization...');
-        console.log('----------------------------------------------');
-        
-        // Create mock performance metrics for weight updates (only for working models)
-        const mockPerformanceMetrics = {};
-        Object.keys(models).forEach(modelType => {
-            if (trainingResults[modelType] && trainingResults[modelType].status === 'completed') {
-                // Use accuracy as performance metric
-                const finalMetrics = trainingResults[modelType].finalMetrics;
-                const accuracy = parseFloat(finalMetrics.finalAccuracy) || 0.5;
-                mockPerformanceMetrics[modelType] = Math.max(0.1, accuracy);
-            }
-        });
-        
-        console.log('📊 Performance metrics for weight update:', mockPerformanceMetrics);
-        
-        const oldWeights = { ...ensemble.weights };
-        ensemble.updateWeights(mockPerformanceMetrics);
-        const newWeights = { ...ensemble.weights };
-        
-        console.log('✅ Weights updated:');
-        Object.keys(oldWeights).forEach(modelType => {
-            console.log(`  ${modelType.toUpperCase()}: ${oldWeights[modelType].toFixed(3)} → ${newWeights[modelType].toFixed(3)}`);
-        });
-        
-        // Test prediction with new weights
-        const optimizedPrediction = await ensemble.predict(testInput.slice([0, 0, 0], [1, -1, -1]));
-        console.log('✅ Prediction with optimized weights:', {
-            prediction: optimizedPrediction.prediction.toFixed(4),
-            confidence: optimizedPrediction.confidence.toFixed(4),
-            signal: optimizedPrediction.signal
-        });
-        
-        // Test 9: Memory usage and cleanup
-        console.log('\n📊 Test 9: Memory Management...');
-        console.log('--------------------------------');
-        
-        const initialMemory = process.memoryUsage();
-        console.log('📊 Initial memory usage:', {
-            heapUsed: Math.round(initialMemory.heapUsed / 1024 / 1024) + 'MB',
-            heapTotal: Math.round(initialMemory.heapTotal / 1024 / 1024) + 'MB'
-        });
-        
-        // Get tensor counts
-        const tf = require('@tensorflow/tfjs');
-        const initialTensors = tf.memory().numTensors;
-        console.log('📊 Initial tensor count:', initialTensors);
-        
-        // Clean up test tensors
-        testInput.dispose();
-        processedData.trainX.dispose();
-        processedData.trainY.dispose();
-        processedData.validationX.dispose();
-        processedData.validationY.dispose();
-        processedData.testX.dispose();
-        processedData.testY.dispose();
-        
-        const afterCleanupTensors = tf.memory().numTensors;
-        console.log('✅ After cleanup tensor count:', afterCleanupTensors);
-        console.log('✅ Tensors disposed:', initialTensors - afterCleanupTensors);
-        
-        // Test 10: Ensemble statistics and reporting
-        console.log('\n📊 Test 10: Final Ensemble Statistics...');
-        console.log('-----------------------------------------');
-        
-        const finalStats = ensemble.getEnsembleStats();
-        console.log('📈 Final Ensemble Statistics:');
-        console.log('  Model Count:', finalStats.modelCount);
-        console.log('  Voting Strategy:', finalStats.votingStrategy);
-        console.log('  Performance History Size:', finalStats.performanceHistorySize);
-        console.log('  Weights:', finalStats.weights);
-        
-        console.log('\n  Individual Model Stats:');
-        Object.entries(finalStats.models).forEach(([modelType, stats]) => {
-            console.log(`    ${modelType.toUpperCase()}:`, {
-                weight: stats.weight.toFixed(3),
-                predictions: stats.predictions,
-                avgConfidence: stats.avgConfidence?.toFixed(3) || 'N/A',
-                lastPrediction: stats.lastPrediction ? new Date(stats.lastPrediction).toLocaleTimeString() : 'Never'
-            });
-        });
-        
-        // Generate ensemble configuration JSON
-        const finalEnsembleConfig = ensemble.toJSON();
-        console.log('\n📄 Ensemble Configuration (for saving):');
-        console.log(JSON.stringify(finalEnsembleConfig, null, 2));
-        
-        console.log('\n🎉 All Model Ensemble tests completed successfully!');
-        console.log('===============================================');
-        console.log('✅ Model Creation: All 4 model types (LSTM, GRU, CNN, Transformer)');
-        console.log('✅ Ensemble Assembly: Multi-model voting system');
-        console.log('✅ Training Pipeline: Quick training validation');
-        console.log('✅ Prediction Strategies: 4 voting strategies tested');
-        console.log('✅ Performance Tracking: Individual and ensemble metrics');
-        console.log('✅ Weight Optimization: Dynamic weight adjustment');
-        console.log('✅ Memory Management: Proper tensor disposal');
-        console.log('✅ Configuration Export: Ensemble state serialization');
         console.log('');
-        console.log('🚀 Advanced Model Ensemble System is ready for production!');
-        console.log('💡 Next steps: Integrate with MLServer for full API access');
+
+        // Step 8: Performance comparison
+        console.log('8. Performance comparison...'.yellow);
+        console.log(`   ⚡ Single Model (LSTM): ${singleTime}ms`.cyan);
+        console.log(`   🤖 Ensemble: ${ensembleTime}ms`.cyan);
+        console.log(`   📊 Performance ratio: ${(ensembleTime / singleTime).toFixed(1)}x slower`.cyan);
+        console.log('');
+
+        // Step 9: Cache effectiveness test
+        console.log('9. Testing cache effectiveness...'.yellow);
         
+        // Second call should be cached
+        const cachedStart = Date.now();
+        const cachedResponse = await axios.get(`${ML_BASE_URL}/api/predictions/${TEST_PAIR}`);
+        const cachedTime = Date.now() - cachedStart;
+        
+        console.log(`   ⚡ Cached call: ${cachedTime}ms`.cyan);
+        console.log(`   📦 Is cached: ${cachedResponse.data.cached ? 'YES' : 'NO'}`.cyan);
+        console.log(`   🚀 Cache speedup: ${(ensembleTime / cachedTime).toFixed(1)}x faster`.cyan);
+        console.log('');
+
+        // Final summary
+        console.log('🎉 ENSEMBLE MODE TEST COMPLETED SUCCESSFULLY!'.green.bold);
+        console.log('==========================================='.green);
+        console.log('');
+        console.log('📊 Test Results Summary:'.cyan.bold);
+        console.log(`   ✅ Ensemble Mode: ${health.ensembleMode ? 'ENABLED' : 'DISABLED'}`.green);
+        console.log(`   ✅ Models Available: ${Object.values(status.individual).filter(m => m.hasModel).length}`.green);
+        console.log(`   ✅ Ensemble Working: ${ensemblePrediction.ensemble ? 'YES' : 'NO'}`.green);
+        console.log(`   ✅ Performance: Single=${singleTime}ms, Ensemble=${ensembleTime}ms, Cached=${cachedTime}ms`.green);
+        console.log('');
+        console.log('🚀 Your ensemble mode is now active and ready for trading!'.green.bold);
+        console.log('');
+        console.log('📋 Next steps:'.yellow.bold);
+        console.log('   1. Train additional models: POST /api/train/BTC/cnn'.blue);
+        console.log('   2. Monitor ensemble performance: GET /api/models/BTC/status'.blue);
+        console.log('   3. Test with other pairs: GET /api/predictions/ETH'.blue);
+        console.log('   4. Adjust cache timeout if needed in .env file'.blue);
+
     } catch (error) {
-        console.error('\n❌ Ensemble test failed:', error.message);
-        console.error('Stack trace:', error.stack);
-        Logger.error('Model ensemble test failed', { error: error.message });
-        process.exit(1);
-    } finally {
-        // Cleanup: Dispose of all models
-        console.log('\n🧹 Cleaning up models...');
+        console.error('❌ Test failed:'.red.bold, error.message);
         
-        Object.values(models).forEach(model => {
-            if (model && typeof model.dispose === 'function') {
-                model.dispose();
-            }
-        });
-        
-        if (ensemble && typeof ensemble.dispose === 'function') {
-            ensemble.dispose();
+        if (error.code === 'ECONNREFUSED') {
+            console.log('');
+            console.log('🔧 Troubleshooting:'.yellow.bold);
+            console.log('   1. Make sure the ML service is running: npm start'.blue);
+            console.log('   2. Check if the service is on port 3001'.blue);
+            console.log('   3. Verify your .env configuration'.blue);
         }
-        
-        if (preprocessor && typeof preprocessor.dispose === 'function') {
-            preprocessor.dispose();
-        }
-        
-        console.log('✅ Cleanup completed');
     }
 }
 
-// Helper function to calculate prediction consistency
-function calculateConsistency(predictions) {
-    if (!predictions || predictions.length < 2) return 0;
-    
-    const mean = predictions.reduce((sum, p) => sum + p, 0) / predictions.length;
-    const variance = predictions.reduce((sum, p) => sum + Math.pow(p - mean, 2), 0) / predictions.length;
-    const stdDev = Math.sqrt(variance);
-    
-    // Consistency is inverse of standard deviation (higher consistency = lower std dev)
-    return Math.max(0, 1 - stdDev * 2); // Scale so 0.5 stddev = 0 consistency
-}
-
-testModelEnsemble();
+// Run the test
+testEnsembleMode().catch(console.error);

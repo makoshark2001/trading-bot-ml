@@ -31,14 +31,14 @@ class MLServer {
         this.modelStatusCache = new Map(); // Model status cache
         this.lastHealthCheck = null; // Health check cache
         
-        // Model configuration
+        // Model configuration - NOW READS FROM CONFIG
         this.modelTypes = ['lstm', 'gru', 'cnn', 'transformer'];
-        this.enabledModels = config.get('ml.ensemble.enabledModels') || ['lstm']; // Start with just LSTM for speed
+        this.enabledModels = config.get('ml.ensemble.enabledModels') || ['lstm', 'gru', 'cnn'];
         this.ensembleStrategy = config.get('ml.ensemble.strategy') || 'weighted';
         
-        // Performance optimization flags
-        this.quickMode = process.env.ML_QUICK_MODE === 'true' || true; // Enable quick mode by default
-        this.cacheTimeout = 30000; // 30 second cache timeout
+        // Performance optimization flags - ENSEMBLE MODE ENABLED
+        this.quickMode = process.env.ML_QUICK_MODE === 'true' || false; // Disable quick mode for ensemble
+        this.cacheTimeout = config.get('ml.prediction.cacheTimeout') || 60000; // 60 second cache for ensemble
         
         // Initialize services first
         this.initializeServices();
@@ -51,7 +51,10 @@ class MLServer {
     }
     
     initializeServices() {
-        Logger.info('Initializing ML services with training queue management...');
+        Logger.info('Initializing ML services with ENSEMBLE MODELS enabled...', {
+            enabledModels: this.enabledModels,
+            quickMode: this.quickMode
+        });
         
         // Initialize data client
         this.dataClient = new DataClient();
@@ -146,7 +149,7 @@ class MLServer {
     }
     
     setupRoutes() {
-        // Fast health check with training queue status
+        // Health check with ensemble status
         this.app.get('/api/health', async (req, res) => {
             try {
                 // Use cached health check if recent
@@ -157,12 +160,13 @@ class MLServer {
                 // Get training queue status
                 const queueStatus = this.trainingQueue.getQueueStatus();
                 
-                // Quick health check
-                const quickHealth = {
+                // Enhanced health check with ensemble info
+                const healthData = {
                     status: 'healthy',
-                    service: 'trading-bot-ml-optimized',
+                    service: 'trading-bot-ml-ensemble-enabled',
                     timestamp: Date.now(),
                     uptime: this.getUptime(),
+                    ensembleMode: !this.quickMode,
                     quickMode: this.quickMode,
                     models: {
                         individual: {
@@ -188,7 +192,8 @@ class MLServer {
                     },
                     performance: {
                         cacheHits: this.getCacheHitRate(),
-                        avgResponseTime: this.getAverageResponseTime()
+                        avgResponseTime: this.getAverageResponseTime(),
+                        cacheTimeout: this.cacheTimeout
                     }
                 };
                 
@@ -197,33 +202,36 @@ class MLServer {
                     Logger.warn('Background core health check failed', { error: err.message });
                 });
                 
-                this.lastHealthCheck = quickHealth;
-                res.json(quickHealth);
+                this.lastHealthCheck = healthData;
+                res.json(healthData);
                 
             } catch (error) {
                 Logger.error('Health check failed', { error: error.message });
                 res.status(500).json({
                     status: 'unhealthy',
-                    service: 'trading-bot-ml-optimized',
+                    service: 'trading-bot-ml-ensemble-enabled',
                     error: error.message,
                     timestamp: Date.now()
                 });
             }
         });
         
-        // Fast prediction endpoint with aggressive caching
+        // ENHANCED prediction endpoint with full ensemble support
         this.app.get('/api/predictions/:pair', async (req, res) => {
             const requestStart = Date.now();
             
             try {
                 const pair = req.params.pair.toUpperCase();
-                const useEnsemble = req.query.ensemble !== 'false';
+                const useEnsemble = req.query.ensemble !== 'false'; // Default to ensemble
                 const strategy = req.query.strategy || this.ensembleStrategy;
+                const singleModel = req.query.model;
                 
                 // Create cache key
-                const cacheKey = `${pair}_${useEnsemble ? 'ensemble' : 'single'}_${strategy}`;
+                const cacheKey = singleModel 
+                    ? `${pair}_single_${singleModel}` 
+                    : `${pair}_${useEnsemble ? 'ensemble' : 'single'}_${strategy}`;
                 
-                // Check cache first (aggressive caching)
+                // Check cache first
                 const cached = this.predictionCache.get(cacheKey);
                 if (cached && (Date.now() - cached.timestamp) < this.cacheTimeout) {
                     Logger.debug(`Cache hit for prediction: ${pair}`, {
@@ -240,12 +248,15 @@ class MLServer {
                 }
                 
                 let prediction;
-                if (useEnsemble && !this.quickMode) {
+                if (singleModel) {
+                    // Specific model requested
+                    prediction = await this.getSingleModelPrediction(pair, singleModel);
+                } else if (useEnsemble && !this.quickMode) {
+                    // Full ensemble prediction
                     prediction = await this.getEnsemblePrediction(pair, { strategy });
                 } else {
-                    // Use single fastest model in quick mode
-                    const fastModel = this.quickMode ? 'lstm' : (req.query.model || 'lstm');
-                    prediction = await this.getSingleModelPrediction(pair, fastModel);
+                    // Single best model (LSTM)
+                    prediction = await this.getSingleModelPrediction(pair, 'lstm');
                 }
                 
                 // Cache the result
@@ -253,8 +264,9 @@ class MLServer {
                     data: {
                         pair,
                         prediction,
-                        ensemble: useEnsemble,
-                        strategy: useEnsemble ? strategy : null,
+                        ensemble: useEnsemble && !singleModel,
+                        strategy: useEnsemble && !singleModel ? strategy : null,
+                        singleModel: singleModel || null,
                         timestamp: Date.now(),
                         responseTime: Date.now() - requestStart
                     },
@@ -267,8 +279,9 @@ class MLServer {
                 res.json({
                     pair,
                     prediction,
-                    ensemble: useEnsemble,
-                    strategy: useEnsemble ? strategy : null,
+                    ensemble: useEnsemble && !singleModel,
+                    strategy: useEnsemble && !singleModel ? strategy : null,
+                    singleModel: singleModel || null,
                     timestamp: Date.now(),
                     cached: false,
                     responseTime: Date.now() - requestStart
@@ -279,8 +292,9 @@ class MLServer {
                     ...prediction,
                     timestamp: Date.now(),
                     requestId: `${pair}_${Date.now()}`,
-                    useEnsemble: useEnsemble,
-                    strategy: useEnsemble ? strategy : null
+                    useEnsemble: useEnsemble && !singleModel,
+                    strategy: useEnsemble && !singleModel ? strategy : null,
+                    singleModel: singleModel || null
                 }).catch(error => {
                     Logger.warn('Failed to save prediction history', { error: error.message });
                 });
@@ -325,56 +339,76 @@ class MLServer {
             }
         });
         
-        // Queue-managed training endpoint
-        this.app.post('/api/train/:pair/:modelType', async (req, res) => {
+        // Enhanced training endpoint - supports all model types
+        this.app.post('/api/train/:pair/:modelType?', async (req, res) => {
             try {
                 const pair = req.params.pair.toUpperCase();
-                const modelType = req.params.modelType.toLowerCase();
+                const modelType = req.params.modelType?.toLowerCase();
                 const trainingConfig = req.body || {};
                 
-                // Check if training is allowed
-                const canTrain = this.trainingQueue.canTrain(pair, modelType);
-                if (!canTrain.allowed) {
-                    return res.status(429).json({
-                        error: 'Training not allowed',
-                        reason: canTrain.reason,
-                        details: canTrain,
-                        pair,
-                        modelType
-                    });
+                // If no model type specified, train all enabled models
+                const modelsToTrain = modelType ? [modelType] : this.enabledModels;
+                
+                const results = [];
+                for (const model of modelsToTrain) {
+                    // Check if training is allowed
+                    const canTrain = this.trainingQueue.canTrain(pair, model);
+                    if (!canTrain.allowed) {
+                        results.push({
+                            pair,
+                            modelType: model,
+                            error: 'Training not allowed',
+                            reason: canTrain.reason,
+                            details: canTrain
+                        });
+                        continue;
+                    }
+                    
+                    try {
+                        // Add training job to queue
+                        const jobId = await this.trainingQueue.addTrainingJob(
+                            pair,
+                            model,
+                            this.performModelTraining.bind(this), // Bind training function
+                            {
+                                ...trainingConfig,
+                                priority: trainingConfig.priority || 5,
+                                maxAttempts: trainingConfig.maxAttempts || 2
+                            }
+                        );
+                        
+                        results.push({
+                            pair,
+                            modelType: model,
+                            jobId,
+                            status: 'queued'
+                        });
+                        
+                    } catch (error) {
+                        results.push({
+                            pair,
+                            modelType: model,
+                            error: error.message,
+                            status: 'failed_to_queue'
+                        });
+                    }
                 }
                 
-                // Add training job to queue
-                const jobId = await this.trainingQueue.addTrainingJob(
-                    pair,
-                    modelType,
-                    this.performModelTraining.bind(this), // Bind training function
-                    {
-                        ...trainingConfig,
-                        priority: trainingConfig.priority || 5,
-                        maxAttempts: trainingConfig.maxAttempts || 2
-                    }
-                );
-                
                 res.json({
-                    message: `Training job queued for ${pair}:${modelType}`,
-                    jobId,
-                    pair,
-                    modelType,
-                    canTrain,
+                    message: `Training jobs processed for ${pair}`,
+                    results,
                     queueStatus: this.trainingQueue.getQueueStatus(),
                     timestamp: Date.now()
                 });
                 
             } catch (error) {
-                Logger.error(`Failed to queue training for ${req.params.pair}:${req.params.modelType}`, { 
+                Logger.error(`Failed to process training for ${req.params.pair}`, { 
                     error: error.message 
                 });
                 res.status(500).json({
-                    error: 'Failed to queue training',
+                    error: 'Failed to process training',
                     message: error.message,
-                    pair: req.params.pair.toUpperCase(),
-                    modelType: req.params.modelType.toLowerCase()
+                    pair: req.params.pair.toUpperCase()
                 });
             }
         });
@@ -467,9 +501,10 @@ class MLServer {
             }
         });
     }
+    
     // Model-related routes
     setupModelRoutes() {
-        // Fast model status endpoint
+        // Enhanced model status endpoint with ensemble info
         this.app.get('/api/models/:pair/status', async (req, res) => {
             try {
                 const pair = req.params.pair.toUpperCase();
@@ -506,7 +541,8 @@ class MLServer {
                             isCompiled: model.isCompiled || false,
                             isTraining: model.isTraining || false
                         } : null,
-                        training: trainingStatus[modelType]
+                        training: trainingStatus[modelType],
+                        hasWeights: this.mlStorage.hasTrainedWeights(pair, modelType)
                     };
                 }
                 
@@ -522,9 +558,11 @@ class MLServer {
                             performanceHistorySize: ensemble.performanceHistory.size
                         } : null,
                         strategy: this.ensembleStrategy,
-                        enabledModels: this.enabledModels
+                        enabledModels: this.enabledModels,
+                        canCreateEnsemble: this.canCreateEnsemble(pair)
                     },
                     trainingQueue: this.trainingQueue.getQueueStatus(),
+                    ensembleMode: !this.quickMode,
                     quickMode: this.quickMode,
                     timestamp: Date.now()
                 };
@@ -643,35 +681,45 @@ class MLServer {
             }
         });
         
-        // Quick API info endpoint
+        // Updated API info endpoint
         this.app.get('/api', (req, res) => {
             res.json({
-                service: 'trading-bot-ml-optimized',
-                version: '2.0.0-performance-queue',
+                service: 'trading-bot-ml-ensemble-enabled',
+                version: '2.1.0-ensemble-enabled',
+                ensembleMode: !this.quickMode,
                 quickMode: this.quickMode,
                 features: [
-                    'Optimized Response Times',
-                    'Aggressive Caching',
+                    'ENSEMBLE MODELS ENABLED',
+                    'Multiple Model Types (LSTM, GRU, CNN)',
+                    'Weighted Ensemble Predictions',
                     'Training Queue Management',
-                    'Concurrent Training Prevention',
-                    'Background Processing',
+                    'Intelligent Caching',
+                    'Pre-trained Weight Loading',
                     'Performance Monitoring'
                 ],
                 endpoints: [
-                    'GET /api/health - Fast health check with training queue status',
-                    'GET /api/predictions/:pair - Fast predictions with 30s cache',
-                    'GET /api/features/:pair - Feature extraction with 5min cache',
-                    'GET /api/models/:pair/status - Model status with training info',
-                    'GET /api/training/queue - Training queue status and history',
-                    'POST /api/train/:pair/:modelType - Queue-managed training',
+                    'GET /api/health - Health check with ensemble status',
+                    'GET /api/predictions/:pair - Ensemble predictions (default) or single model',
+                    'GET /api/predictions/:pair?model=lstm - Specific model prediction',
+                    'GET /api/predictions/:pair?ensemble=false - Disable ensemble',
+                    'GET /api/predictions/:pair?strategy=weighted - Ensemble strategy',
+                    'GET /api/features/:pair - Feature extraction with caching',
+                    'GET /api/models/:pair/status - Model status with ensemble info',
+                    'GET /api/training/queue - Training queue status',
+                    'POST /api/train/:pair - Train all enabled models',
+                    'POST /api/train/:pair/:modelType - Train specific model',
                     'DELETE /api/training/job/:jobId - Cancel training job',
                     'POST /api/training/emergency-stop - Emergency stop all training',
-                    'POST /api/training/clear-cooldowns - Clear training cooldowns (admin)',
+                    'POST /api/training/clear-cooldowns - Clear training cooldowns',
                     'GET /api/storage/stats - Storage and performance statistics'
                 ],
-                performance: {
-                    cacheTimeout: this.cacheTimeout,
+                ensemble: {
                     enabledModels: this.enabledModels,
+                    strategy: this.ensembleStrategy,
+                    cacheTimeout: this.cacheTimeout,
+                    currentEnsembles: Object.keys(this.ensembles).length
+                },
+                performance: {
                     currentCacheSize: {
                         predictions: this.predictionCache.size,
                         features: this.featureCache.size,
@@ -716,9 +764,11 @@ class MLServer {
             // Get or create model
             const model = await this.getOrCreateModel(pair, modelType, currentFeatureCount);
             
+            // Get model-specific training config
+            const modelConfig = config.get(`ml.models.${modelType}`) || {};
             const modelTrainingConfig = {
-                epochs: config.epochs || 25, // Reduced for queue management
-                batchSize: config.batchSize || 32,
+                epochs: config.epochs || modelConfig.epochs || 25,
+                batchSize: config.batchSize || modelConfig.batchSize || 32,
                 verbose: 0, // Silent training
                 ...config
             };
@@ -765,6 +815,9 @@ class MLServer {
             // Save training history
             await this.mlStorage.saveTrainingHistory(`${pair}_${modelType}`, trainingResults);
             
+            // Recreate ensemble if we have enough models
+            await this.recreateEnsembleIfNeeded(pair);
+            
             Logger.info(`Queued training completed for ${pair}:${modelType}`, trainingResults.finalMetrics);
             
             return trainingResults;
@@ -775,7 +828,76 @@ class MLServer {
         }
     }
     
-    // Optimized single model prediction (fastest path)
+    // FULL ENSEMBLE PREDICTION IMPLEMENTATION
+    async getEnsemblePrediction(pair, options = {}) {
+        const cacheKey = `${pair}_ensemble_${options.strategy || this.ensembleStrategy}`;
+        
+        // Check cache first
+        if (this.predictions[cacheKey] && 
+            (Date.now() - this.predictions[cacheKey].timestamp) < this.cacheTimeout) {
+            return this.predictions[cacheKey];
+        }
+        
+        try {
+            // Get or create ensemble for this pair
+            let ensemble = this.ensembles[pair];
+            if (!ensemble) {
+                ensemble = await this.createEnsemble(pair);
+                if (!ensemble) {
+                    Logger.warn(`No ensemble available for ${pair}, falling back to LSTM`);
+                    return this.getSingleModelPrediction(pair, 'lstm');
+                }
+            }
+            
+            // Get data and extract features
+            const pairData = await this.dataClient.getPairData(pair);
+            const features = this.featureExtractor.extractFeatures(pairData);
+            const currentFeatureCount = features.features.length;
+            
+            // Update feature count tracking
+            this.featureCounts[pair] = currentFeatureCount;
+            
+            // Prepare input for prediction
+            const inputData = await this.prepareRealTimeInput(features.features);
+            
+            // Make ensemble prediction
+            const ensemblePrediction = await ensemble.predict(inputData, options);
+            
+            const result = {
+                ...ensemblePrediction,
+                metadata: {
+                    timestamp: Date.now(),
+                    version: '2.1.0-ensemble-enabled',
+                    type: 'ensemble_prediction',
+                    featureCount: currentFeatureCount,
+                    ensembleMode: true
+                }
+            };
+            
+            // Cache result
+            this.predictions[cacheKey] = {
+                ...result,
+                timestamp: Date.now(),
+                type: 'ensemble'
+            };
+            
+            // Clean up input tensor
+            if (inputData && typeof inputData.dispose === 'function') {
+                inputData.dispose();
+            }
+            
+            return this.predictions[cacheKey];
+            
+        } catch (error) {
+            Logger.error(`Ensemble prediction failed for ${pair}`, { error: error.message });
+            
+            // Fallback to single model
+            Logger.info(`Falling back to single model for ${pair}`);
+            return this.getSingleModelPrediction(pair, 'lstm');
+        }
+    }
+    
+    // Single model prediction (optimized but not quick mode)
     async getSingleModelPrediction(pair, modelType = 'lstm') {
         const cacheKey = `${pair}_${modelType}`;
         
@@ -805,7 +927,29 @@ class MLServer {
             
             // Make prediction
             const predictions = await model.predict(inputData);
-            const prediction = Array.isArray(predictions) ? predictions[0] : predictions;
+            let prediction;
+
+            // Handle TensorFlow tensor data properly
+            if (Array.isArray(predictions)) {
+                prediction = predictions[0];
+            } else {
+                prediction = predictions;
+            }
+
+            // Ensure we get a simple number, not a tensor object
+            if (typeof prediction === 'object' && prediction !== null) {
+                // Handle tensor data format like {"0": 0.4962764084339142}
+                if (typeof prediction[0] === 'number') {
+                    prediction = prediction[0];
+                } else if (prediction.dataSync) {
+                    // Handle actual TensorFlow tensor
+                    const data = prediction.dataSync();
+                    prediction = data[0];
+                } else {
+                    // Fallback for unknown object format
+                    prediction = 0.5;
+                }
+            }
             
             const result = {
                 prediction: prediction,
@@ -819,10 +963,10 @@ class MLServer {
                 },
                 metadata: {
                     timestamp: Date.now(),
-                    version: '2.0.0-performance-queue',
+                    version: '2.1.0-ensemble-enabled',
                     type: 'individual_prediction',
                     featureCount: currentFeatureCount,
-                    quickMode: this.quickMode
+                    ensembleMode: false
                 }
             };
             
@@ -856,28 +1000,132 @@ class MLServer {
                 },
                 metadata: {
                     timestamp: Date.now(),
-                    version: '2.0.0-performance-queue',
+                    version: '2.1.0-ensemble-enabled',
                     type: 'fallback_prediction',
                     error: error.message,
-                    quickMode: this.quickMode
+                    ensembleMode: false
                 }
             };
         }
     }
     
-    // Simplified ensemble prediction (only if not in quick mode)
-    async getEnsemblePrediction(pair, options = {}) {
-        if (this.quickMode) {
-            // In quick mode, just use the fastest single model
-            return this.getSingleModelPrediction(pair, 'lstm');
+    // Create ensemble for a pair
+    async createEnsemble(pair) {
+        try {
+            Logger.info(`Creating ensemble for ${pair}`, {
+                enabledModels: this.enabledModels,
+                strategy: this.ensembleStrategy
+            });
+            
+            // Check if we have enough models
+            if (!this.models[pair]) {
+                Logger.warn(`No models available for ${pair} ensemble`);
+                return null;
+            }
+            
+            const availableModels = Object.keys(this.models[pair]);
+            if (availableModels.length < 2) {
+                Logger.warn(`Insufficient models for ${pair} ensemble`, {
+                    available: availableModels.length,
+                    required: 2
+                });
+                return null;
+            }
+            
+            // Create ensemble
+            const ensemble = new ModelEnsemble({
+                modelTypes: this.enabledModels,
+                weights: this.getDefaultWeights(),
+                votingStrategy: this.ensembleStrategy
+            });
+            
+            // Add models to ensemble
+            let modelsAdded = 0;
+            for (const modelType of this.enabledModels) {
+                if (this.models[pair][modelType]) {
+                    ensemble.addModel(
+                        modelType, 
+                        this.models[pair][modelType], 
+                        this.getModelWeight(modelType),
+                        { pair: pair, addedAt: Date.now() }
+                    );
+                    modelsAdded++;
+                }
+            }
+            
+            if (modelsAdded < 2) {
+                Logger.warn(`Not enough models added to ensemble for ${pair}`, {
+                    modelsAdded,
+                    required: 2
+                });
+                return null;
+            }
+            
+            this.ensembles[pair] = ensemble;
+            
+            Logger.info(`Ensemble created for ${pair}`, {
+                modelsAdded,
+                strategy: this.ensembleStrategy,
+                weights: ensemble.weights
+            });
+            
+            return ensemble;
+            
+        } catch (error) {
+            Logger.error(`Failed to create ensemble for ${pair}`, { error: error.message });
+            return null;
         }
-        
-        // Full ensemble logic would go here
-        // For now, fallback to single model
-        return this.getSingleModelPrediction(pair, 'lstm');
     }
     
-    // Create individual model - optimized for speed with weight loading
+    // Check if we can create an ensemble
+    canCreateEnsemble(pair) {
+        if (!this.models[pair]) return false;
+        const availableModels = Object.keys(this.models[pair]);
+        return availableModels.length >= 2;
+    }
+    
+    // Recreate ensemble after training
+    async recreateEnsembleIfNeeded(pair) {
+        try {
+            if (this.canCreateEnsemble(pair)) {
+                // Dispose old ensemble if exists
+                if (this.ensembles[pair]) {
+                    this.ensembles[pair].dispose();
+                    delete this.ensembles[pair];
+                }
+                
+                // Create new ensemble
+                const ensemble = await this.createEnsemble(pair);
+                if (ensemble) {
+                    Logger.info(`Ensemble recreated for ${pair} after training`);
+                }
+            }
+        } catch (error) {
+            Logger.error(`Failed to recreate ensemble for ${pair}`, { error: error.message });
+        }
+    }
+    
+    // Get default model weights
+    getDefaultWeights() {
+        const weights = {};
+        this.enabledModels.forEach(modelType => {
+            weights[modelType] = this.getModelWeight(modelType);
+        });
+        return weights;
+    }
+    
+    // Get weight for specific model type
+    getModelWeight(modelType) {
+        const weights = {
+            'lstm': 1.0,    // Strong baseline
+            'gru': 0.9,     // Slightly lower than LSTM
+            'cnn': 0.8,     // Good for pattern recognition
+            'transformer': 0.7 // Complex but sometimes unstable
+        };
+        return weights[modelType] || 1.0;
+    }
+    
+    // Create individual model - enhanced for ensemble use
     async getOrCreateModel(pair, modelType, featureCount) {
         if (!this.models[pair]) {
             this.models[pair] = {};
@@ -897,24 +1145,19 @@ class MLServer {
             }
         }
         
-        Logger.info(`Creating optimized ${modelType} model for ${pair}`, { featureCount });
+        Logger.info(`Creating ${modelType} model for ${pair}`, { featureCount });
         
-        // Create optimized config for fast training/inference
+        // Create config with proper feature count
         const baseConfig = {
-            sequenceLength: 30, // Reduced from 60 for speed
+            sequenceLength: this.quickMode ? 30 : 60, // Full sequence in ensemble mode
             features: featureCount
         };
         
-        // Get model-specific config with optimizations
+        // Get model-specific config 
         const modelSpecificConfig = config.get(`ml.models.${modelType}`) || {};
         const finalConfig = {
             ...modelSpecificConfig,
-            ...baseConfig,
-            // Performance optimizations
-            units: Math.min(modelSpecificConfig.units || 50, 32), // Smaller networks
-            layers: Math.min(modelSpecificConfig.layers || 2, 1), // Fewer layers
-            epochs: Math.min(modelSpecificConfig.epochs || 100, 10), // Fewer epochs for quick mode
-            dropout: 0.1 // Reduced dropout
+            ...baseConfig
         };
         
         // Try to load pre-trained weights first
@@ -973,10 +1216,10 @@ class MLServer {
         }
     }
     
-    // Optimized input preparation
+    // Enhanced input preparation
     async prepareRealTimeInput(features) {
         const tf = require('@tensorflow/tfjs');
-        const sequenceLength = 30; // Reduced for performance
+        const sequenceLength = this.quickMode ? 30 : 60; // Full sequence for ensemble
         
         // Create a mock sequence by repeating the current features
         const sequence = Array(sequenceLength).fill(features);
@@ -1066,43 +1309,41 @@ class MLServer {
     
     async start() {
         try {
-            Logger.info('Starting Optimized ML Server with Training Queue Management...');
+            Logger.info('Starting ML Server with ENSEMBLE MODELS ENABLED...');
             
-            // Don't wait for core service in quick mode - start immediately
-            if (!this.quickMode) {
-                await this.dataClient.waitForCoreService();
-            } else {
-                Logger.info('Quick mode enabled - starting without waiting for core service');
-            }
+            // Wait for core service (not in quick mode anymore)
+            await this.dataClient.waitForCoreService();
             
             // Start HTTP server
             this.server = this.app.listen(this.port, () => {
-                Logger.info(`Optimized ML Server running at http://localhost:${this.port}`);
-                console.log(`🚀 Optimized ML API available at: http://localhost:${this.port}/api`);
+                Logger.info(`Ensemble-enabled ML Server running at http://localhost:${this.port}`);
+                console.log(`🚀 ENSEMBLE ML API available at: http://localhost:${this.port}/api`);
                 console.log(`⚡ Health check: http://localhost:${this.port}/api/health`);
-                console.log(`🎯 Fast predictions: http://localhost:${this.port}/api/predictions/BTC`);
-                console.log(`📊 Performance stats: http://localhost:${this.port}/api/storage/stats`);
+                console.log(`🎯 Ensemble predictions: http://localhost:${this.port}/api/predictions/BTC`);
+                console.log(`🤖 Single model: http://localhost:${this.port}/api/predictions/BTC?model=lstm`);
+                console.log(`📊 Model status: http://localhost:${this.port}/api/models/BTC/status`);
                 console.log(`🔄 Training queue: http://localhost:${this.port}/api/training/queue`);
                 console.log('');
-                console.log('⚡ Performance Optimizations Active:');
+                console.log('🤖 ENSEMBLE FEATURES ACTIVE:');
+                console.log(`   • Ensemble Mode: ${!this.quickMode ? 'ENABLED' : 'DISABLED'}`);
                 console.log(`   • Quick Mode: ${this.quickMode ? 'ENABLED' : 'DISABLED'}`);
-                console.log(`   • Cache Timeout: ${this.cacheTimeout}ms`);
                 console.log(`   • Enabled Models: ${this.enabledModels.join(', ')}`);
+                console.log(`   • Ensemble Strategy: ${this.ensembleStrategy}`);
+                console.log(`   • Cache Timeout: ${this.cacheTimeout}ms`);
                 console.log(`   • Max Concurrent Training: ${this.trainingQueue?.maxConcurrentTraining || 'Not Ready'}`);
                 console.log(`   • Training Cooldown: ${this.trainingQueue?.trainingCooldown ? (this.trainingQueue.trainingCooldown / 1000 / 60) + ' minutes' : 'Not Ready'}`);
-                console.log(`   • Aggressive Caching: ENABLED`);
-                console.log(`   • Background Processing: ENABLED`);
+                console.log(`   • Intelligent Caching: ENABLED`);
                 console.log(`   • Training Queue: ${this.trainingQueue ? 'ACTIVE' : 'INITIALIZING'}`);
             });
             
         } catch (error) {
-            Logger.error('Failed to start Optimized ML server', { error: error.message });
+            Logger.error('Failed to start Ensemble ML server', { error: error.message });
             process.exit(1);
         }
     }
     
     async stop() {
-        Logger.info('Stopping Optimized ML Server with Training Queue...');
+        Logger.info('Stopping Ensemble ML Server...');
         
         // Stop training queue first
         if (this.trainingQueue) {
@@ -1114,10 +1355,12 @@ class MLServer {
         this.featureCache.clear();
         this.modelStatusCache.clear();
         
-        // Shutdown storage system gracefully
-        if (this.mlStorage) {
-            await this.mlStorage.shutdown();
-        }
+        // Dispose of all ensembles
+        Object.values(this.ensembles).forEach(ensemble => {
+            if (ensemble && typeof ensemble.dispose === 'function') {
+                ensemble.dispose();
+            }
+        });
         
         // Dispose of all models
         Object.values(this.models).forEach(pairModels => {
@@ -1128,6 +1371,11 @@ class MLServer {
             });
         });
         
+        // Shutdown storage system gracefully
+        if (this.mlStorage) {
+            await this.mlStorage.shutdown();
+        }
+        
         if (this.preprocessor) {
             this.preprocessor.dispose();
         }
@@ -1136,9 +1384,8 @@ class MLServer {
             this.server.close();
         }
         
-        Logger.info('Optimized ML Server stopped');
+        Logger.info('Ensemble ML Server stopped');
     }
 }
 
 module.exports = MLServer;
-                
