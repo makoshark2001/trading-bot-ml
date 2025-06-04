@@ -65,7 +65,7 @@ class MLServer {
         // Initialize data preprocessor
         this.preprocessor = new DataPreprocessor(config.get('ml.models.lstm'));
         
-        // Initialize advanced ML storage
+        // Initialize advanced ML storage with NEW consolidated format
         this.mlStorage = new MLStorage({
             baseDir: config.get('ml.storage.baseDir'),
             saveInterval: config.get('ml.storage.saveInterval'),
@@ -77,7 +77,8 @@ class MLServer {
             enabledModels: this.enabledModels,
             ensembleStrategy: this.ensembleStrategy,
             quickMode: this.quickMode,
-            cacheTimeout: this.cacheTimeout
+            cacheTimeout: this.cacheTimeout,
+            storageType: 'consolidated'
         });
     }
     
@@ -1762,11 +1763,18 @@ class MLServer {
             
             // Check if consolidation migration is needed
             try {
-                const legacyExists = require('fs').existsSync(require('path').join(this.mlStorage.weightsDir, '.'));
-                if (legacyExists) {
+                const fs = require('fs');
+                const path = require('path');
+                const legacyWeightsDir = path.join(this.mlStorage.weightsDir || path.join(this.mlStorage.baseDir, 'weights'));
+                
+                if (fs.existsSync(legacyWeightsDir) && typeof this.mlStorage.migrateLegacyData === 'function') {
                     Logger.info('🔄 Legacy storage detected, starting migration...');
                     const migrationResults = await this.mlStorage.migrateLegacyData();
                     Logger.info('✅ Migration completed', migrationResults);
+                } else if (fs.existsSync(legacyWeightsDir)) {
+                    Logger.info('⚠️ Legacy storage detected but migration not available');
+                } else {
+                    Logger.info('✅ Using consolidated storage, no migration needed');
                 }
             } catch (migrationError) {
                 Logger.warn('Migration check failed', { error: migrationError.message });
