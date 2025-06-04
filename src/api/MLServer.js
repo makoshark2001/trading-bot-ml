@@ -1133,8 +1133,19 @@ class MLServer {
             const featuresArray = Array(binaryTargets.length).fill().map(() => features.features);
             const processedData = await this.preprocessor.prepareTrainingData(featuresArray, binaryTargets);
             
-            // Get or create model
+            // Get or create model WITH PROPER COMPILATION
             const model = await this.getOrCreateModel(pair, modelType, currentFeatureCount);
+            
+            // 🔧 CRITICAL FIX: Ensure model is compiled before training
+            if (!model.isCompiled) {
+                Logger.warn(`Model ${pair}:${modelType} not compiled, compiling now...`);
+                model.compileModel();
+            }
+            
+            // Double check compilation
+            if (!model.isCompiled) {
+                throw new Error(`Failed to compile ${modelType} model for ${pair}`);
+            }
             
             // Get model-specific training config
             const modelConfig = this.getModelConfig(modelType);
@@ -1144,6 +1155,12 @@ class MLServer {
                 verbose: 0, // Silent training
                 ...config
             };
+            
+            Logger.info(`Starting training for ${pair}:${modelType}`, {
+                isCompiled: model.isCompiled,
+                config: modelTrainingConfig,
+                featureCount: currentFeatureCount
+            });
             
             // Perform training
             const history = await model.train(
@@ -1538,7 +1555,7 @@ class MLServer {
         return weights[modelType] || 1.0;
     }
     
-    // Create individual model - enhanced for ensemble use
+    // Create individual model - enhanced for ensemble use with FIXED COMPILATION
     async getOrCreateModel(pair, modelType, featureCount) {
         if (!this.models[pair]) {
             this.models[pair] = {};
@@ -1548,6 +1565,11 @@ class MLServer {
         if (this.models[pair][modelType]) {
             const existingModel = this.models[pair][modelType];
             if (existingModel.features === featureCount) {
+                // 🔧 CRITICAL FIX: Ensure existing model is compiled
+                if (!existingModel.isCompiled) {
+                    Logger.warn(`Existing model ${pair}:${modelType} not compiled, compiling now...`);
+                    existingModel.compileModel();
+                }
                 return existingModel; // Model is correct, return it
             } else {
                 // Feature count mismatch, dispose and recreate
@@ -1581,9 +1603,16 @@ class MLServer {
             try {
                 model = await this.mlStorage.loadModelWeights(pair, modelType, ModelClass, finalConfig);
                 if (model) {
+                    // 🔧 CRITICAL FIX: Ensure loaded model is compiled
+                    if (!model.isCompiled) {
+                        Logger.warn(`Loaded model ${pair}:${modelType} not compiled, compiling now...`);
+                        model.compileModel();
+                    }
+                    
                     Logger.info(`Loaded pre-trained ${modelType} model for ${pair}`, {
                         featureCount,
-                        params: model.model?.countParams?.() || 0
+                        params: model.model?.countParams?.() || 0,
+                        isCompiled: model.isCompiled
                     });
                     model.features = featureCount;
                     this.models[pair][modelType] = model;
@@ -1599,7 +1628,13 @@ class MLServer {
         // Create new model if loading failed or no weights exist
         model = new ModelClass(finalConfig);
         model.buildModel();
-        model.compileModel();
+        model.compileModel(); // 🔧 CRITICAL FIX: Always compile new models
+        
+        // 🔧 CRITICAL FIX: Verify compilation succeeded
+        if (!model.isCompiled) {
+            throw new Error(`Failed to compile new ${modelType} model for ${pair}`);
+        }
+        
         model.features = featureCount; // Store feature count for quick access
         
         this.models[pair][modelType] = model;
@@ -1607,7 +1642,8 @@ class MLServer {
         Logger.info(`New ${modelType} model created for ${pair}`, {
             featureCount,
             params: model.model?.countParams?.() || 0,
-            hasPretrainedWeights: false
+            hasPretrainedWeights: false,
+            isCompiled: model.isCompiled
         });
         
         return model;
