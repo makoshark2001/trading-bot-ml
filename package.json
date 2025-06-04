@@ -1,7 +1,7 @@
 {
   "name": "trading-bot-ml",
   "version": "1.0.0",
-  "description": "Machine Learning service for Advanced Trading Bot - LSTM Predictions & AI Analysis with Advanced Persistence",
+  "description": "Machine Learning service for Advanced Trading Bot - LSTM Predictions & AI Analysis with CPU-Optimized TensorFlow.js",
   "repository": {
     "type": "git",
     "url": "https://github.com/makoshark2001/trading-bot-ml"
@@ -16,11 +16,13 @@
     "test:models": "node scripts/test-lstm-model.js",
     "test:integration": "node scripts/test-integration.js",
     "test:storage": "node scripts/test-ml-storage.js",
-    "test:all": "npm run test:data && npm run test:features && npm run test:models && npm run test:storage && npm run test:integration"
+    "test:performance": "node scripts/test-performance.js",
+    "test:all": "npm run test:data && npm run test:features && npm run test:models && npm run test:storage && npm run test:integration && npm run test:performance"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-cpu": "^4.22.0",
+    "@tensorflow/tfjs-node": "^4.22.0",
     "axios": "^1.6.0",
     "colors": "^1.4.0",
     "config": "^3.3.9",
@@ -41,7 +43,8 @@
     "ai",
     "persistence",
     "storage",
-    "atomic-writes"
+    "atomic-writes",
+    "cpu-optimized"
   ],
   "author": "HTMauney",
   "license": "ISC",

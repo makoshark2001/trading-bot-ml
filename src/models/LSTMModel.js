@@ -1,6 +1,5 @@
 const tf = require('@tensorflow/tfjs');
-require('@tensorflow/tfjs-backend-cpu'); // Add CPU backend
-const { Logger } = require('../utils');
+const { Logger, GPUManager } = require('../utils');
 
 class LSTMModel {
     constructor(config = {}) {
@@ -15,10 +14,11 @@ class LSTMModel {
         this.isCompiled = false;
         this.isTraining = false;
         
-        // Set TensorFlow backend
-        this.initializeTensorFlow();
+        // GPU Manager for acceleration
+        this.gpuManager = new GPUManager();
+        this.gpuInitialized = false;
         
-        Logger.info('LSTMModel initialized', {
+        Logger.info('LSTMModel initialized with GPU support', {
             sequenceLength: this.sequenceLength,
             features: this.features,
             units: this.units,
@@ -28,20 +28,41 @@ class LSTMModel {
     
     async initializeTensorFlow() {
         try {
-            // Set platform to use CPU backend
+            // Initialize GPU manager first
+            if (!this.gpuInitialized) {
+                await this.gpuManager.initialize();
+                this.gpuInitialized = true;
+            }
+            
+            // Ensure TensorFlow is ready with the selected backend
             await tf.ready();
-            Logger.info('TensorFlow.js initialized', {
+            
+            const gpuStatus = this.gpuManager.getStatus();
+            Logger.info('TensorFlow.js initialized for LSTM with GPU support', {
                 backend: tf.getBackend(),
+                gpuAvailable: gpuStatus.gpuAvailable,
                 version: tf.version.tfjs
             });
+            
         } catch (error) {
-            Logger.error('Failed to initialize TensorFlow.js', { error: error.message });
+            Logger.error('Failed to initialize TensorFlow.js for LSTM', { error: error.message });
+            // Try to fallback to CPU
+            try {
+                await this.gpuManager.switchToCPU();
+                await tf.ready();
+                Logger.warn('LSTM initialized with CPU fallback after GPU failure');
+            } catch (fallbackError) {
+                Logger.error('Complete TensorFlow initialization failure', { 
+                    error: fallbackError.message 
+                });
+                throw fallbackError;
+            }
         }
     }
     
     buildModel() {
         try {
-            Logger.info('Building LSTM model...');
+            Logger.info('Building LSTM model with GPU acceleration support...');
             
             this.model = tf.sequential();
             
@@ -82,7 +103,8 @@ class LSTMModel {
             
             Logger.info('LSTM model built successfully', {
                 totalParams: this.model.countParams(),
-                layers: this.model.layers.length
+                layers: this.model.layers.length,
+                backend: tf.getBackend()
             });
             
             return this.model;
@@ -121,6 +143,16 @@ class LSTMModel {
             throw new Error('Model must be compiled before training');
         }
         
+        // Ensure TensorFlow is initialized
+        await this.initializeTensorFlow();
+        
+        // Use GPU manager for training with automatic fallback
+        return await this.gpuManager.performWithGPUFallback(async () => {
+            return await this.performTraining(trainX, trainY, validationX, validationY, config);
+        }, 'LSTM training');
+    }
+    
+    async performTraining(trainX, trainY, validationX, validationY, config = {}) {
         try {
             this.isTraining = true;
             
@@ -128,23 +160,35 @@ class LSTMModel {
             const batchSize = config.batchSize || 32;
             const verbose = config.verbose !== undefined ? config.verbose : 1;
             
-            Logger.info('Starting LSTM model training', {
+            const currentBackend = tf.getBackend();
+            const gpuStatus = this.gpuManager.getStatus();
+            
+            Logger.info('Starting LSTM model training with GPU acceleration', {
                 epochs,
                 batchSize,
                 trainSamples: trainX.shape[0],
-                validationSamples: validationX ? validationX.shape[0] : 0
+                validationSamples: validationX ? validationX.shape[0] : 0,
+                backend: currentBackend,
+                gpuAvailable: gpuStatus.gpuAvailable,
+                gpuActive: currentBackend !== 'cpu'
             });
             
             const callbacks = {
                 onEpochEnd: (epoch, logs) => {
                     if (epoch % 10 === 0 || epoch === epochs - 1) {
-                        Logger.info(`Epoch ${epoch + 1}/${epochs}`, {
+                        Logger.info(`LSTM Epoch ${epoch + 1}/${epochs} [${currentBackend.toUpperCase()}]`, {
                             loss: logs.loss.toFixed(4),
                             accuracy: logs.acc.toFixed(4),
                             valLoss: logs.val_loss?.toFixed(4),
-                            valAccuracy: logs.val_acc?.toFixed(4)
+                            valAccuracy: logs.val_acc?.toFixed(4),
+                            backend: currentBackend,
+                            memoryUsage: tf.memory().numBytes
                         });
                     }
+                },
+                onTrainEnd: () => {
+                    // Clean up metrics periodically
+                    this.gpuManager.cleanupMetrics();
                 }
             };
             
@@ -159,16 +203,34 @@ class LSTMModel {
             
             this.isTraining = false;
             
-            Logger.info('LSTM model training completed', {
+            const finalMetrics = {
                 finalLoss: history.history.loss[history.history.loss.length - 1].toFixed(4),
-                finalAccuracy: history.history.acc[history.history.acc.length - 1].toFixed(4)
-            });
+                finalAccuracy: history.history.acc[history.history.acc.length - 1].toFixed(4),
+                backend: currentBackend,
+                gpuAccelerated: currentBackend !== 'cpu'
+            };
+            
+            if (validationX && validationY) {
+                finalMetrics.finalValLoss = history.history.val_loss[history.history.val_loss.length - 1].toFixed(4);
+                finalMetrics.finalValAccuracy = history.history.val_acc[history.history.val_acc.length - 1].toFixed(4);
+            }
+            
+            Logger.info('LSTM model training completed', finalMetrics);
+            
+            // Log performance comparison if available
+            const perfComparison = this.gpuManager.getPerformanceComparison();
+            if (perfComparison) {
+                Logger.info('GPU vs CPU Performance Comparison', perfComparison);
+            }
             
             return history;
             
         } catch (error) {
             this.isTraining = false;
-            Logger.error('LSTM model training failed', { error: error.message });
+            Logger.error('LSTM model training failed', { 
+                error: error.message,
+                backend: tf.getBackend()
+            });
             throw error;
         }
     }
@@ -180,7 +242,8 @@ class LSTMModel {
         
         try {
             Logger.debug('Making LSTM prediction', {
-                inputShape: inputX.shape
+                inputShape: inputX.shape,
+                backend: tf.getBackend()
             });
             
             const prediction = this.model.predict(inputX);
@@ -192,7 +255,10 @@ class LSTMModel {
             return result;
             
         } catch (error) {
-            Logger.error('LSTM prediction failed', { error: error.message });
+            Logger.error('LSTM prediction failed', { 
+                error: error.message,
+                backend: tf.getBackend()
+            });
             throw error;
         }
     }
@@ -217,7 +283,8 @@ class LSTMModel {
             
             const results = {
                 loss: loss[0],
-                accuracy: accuracy[0]
+                accuracy: accuracy[0],
+                backend: tf.getBackend()
             };
             
             Logger.info('LSTM model evaluation completed', results);
@@ -225,7 +292,10 @@ class LSTMModel {
             return results;
             
         } catch (error) {
-            Logger.error('LSTM model evaluation failed', { error: error.message });
+            Logger.error('LSTM model evaluation failed', { 
+                error: error.message,
+                backend: tf.getBackend()
+            });
             throw error;
         }
     }
@@ -252,12 +322,16 @@ class LSTMModel {
         try {
             Logger.info('Loading LSTM model', { path: modelPath });
             
+            // Ensure TensorFlow is initialized before loading
+            await this.initializeTensorFlow();
+            
             this.model = await tf.loadLayersModel(`file://${modelPath}/model.json`);
             this.isCompiled = true;
             
             Logger.info('LSTM model loaded successfully', {
                 totalParams: this.model.countParams(),
-                layers: this.model.layers.length
+                layers: this.model.layers.length,
+                backend: tf.getBackend()
             });
             
         } catch (error) {
@@ -271,6 +345,8 @@ class LSTMModel {
             return 'Model not built yet';
         }
         
+        const gpuStatus = this.gpuManager ? this.gpuManager.getStatus() : null;
+        
         return {
             layers: this.model.layers.length,
             totalParams: this.model.countParams(),
@@ -278,8 +354,26 @@ class LSTMModel {
             inputShape: this.model.inputShape,
             outputShape: this.model.outputShape,
             isCompiled: this.isCompiled,
-            isTraining: this.isTraining
+            isTraining: this.isTraining,
+            backend: tf.getBackend(),
+            gpu: {
+                available: gpuStatus?.gpuAvailable || false,
+                currentBackend: gpuStatus?.currentBackend || 'unknown',
+                memoryUsage: tf.memory()
+            }
         };
+    }
+    
+    getGPUStatus() {
+        return this.gpuManager ? this.gpuManager.getStatus() : {
+            gpuAvailable: false,
+            currentBackend: 'cpu',
+            error: 'GPU manager not initialized'
+        };
+    }
+    
+    getPerformanceMetrics() {
+        return this.gpuManager ? this.gpuManager.getPerformanceComparison() : null;
     }
     
     dispose() {
@@ -287,8 +381,13 @@ class LSTMModel {
             this.model.dispose();
             this.model = null;
             this.isCompiled = false;
-            Logger.info('LSTM model disposed');
         }
+        
+        if (this.gpuManager) {
+            this.gpuManager.dispose();
+        }
+        
+        Logger.info('LSTM model disposed');
     }
 }
 
