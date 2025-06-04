@@ -102,10 +102,14 @@
     "training": {
       "autoTraining": true,
       "periodicTraining": true,
+      "periodicInterval": 3600000,
+      "periodicEpochs": 15,
+      "retrainThreshold": 3600000,
       "interval": 86400000,
       "minDataAge": 43200000,
       "defaultEpochs": 50,
       "defaultBatchSize": 32,
+      "maxConcurrent": 2,
       "autoTrainingConfig": {
         "epochs": 25,
         "batchSize": 32,
@@ -113,11 +117,12 @@
         "description": "Reduced epochs for automatic training on first use"
       },
       "periodicTrainingConfig": {
-        "epochs": 50,
+        "epochs": 15,
         "batchSize": 32,
         "verbose": 0,
-        "description": "Full training for periodic updates"
+        "description": "Fast training for periodic updates"
       },
+      "quietHours": null,
       "earlyStopping": {
         "monitor": "val_loss",
         "patience": 15,

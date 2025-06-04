@@ -183,7 +183,7 @@ class MLStorage {
         return data;
     }
     
-    // NEW: Weight persistence methods
+    // 🆕 FIXED: Weight persistence methods without file:// URLs
     async saveModelWeights(pair, modelType, model) {
         try {
             const weightsDir = path.join(this.weightsDir, `${pair.toLowerCase()}_${modelType}`);
@@ -193,15 +193,50 @@ class MLStorage {
                 fs.mkdirSync(weightsDir, { recursive: true });
             }
             
-            // Save model weights
-            await model.save(`file://${weightsDir}`);
+            // 🆕 FIXED: Extract weights as JSON data instead of using model.save()
+            const weights = model.model.getWeights();
+            const weightsData = [];
             
-            // Save metadata
+            for (let i = 0; i < weights.length; i++) {
+                const weightTensor = weights[i];
+                const weightArray = await weightTensor.data();
+                const shape = weightTensor.shape;
+                
+                weightsData.push({
+                    data: Array.from(weightArray),
+                    shape: shape,
+                    dtype: weightTensor.dtype
+                });
+                
+                
+            }
+            
+            // Save weights as JSON
+            const weightsPath = path.join(weightsDir, 'weights.json');
+            await this.writeFileAtomic(weightsPath, {
+                weights: weightsData,
+                timestamp: Date.now(),
+                version: '1.0.0'
+            });
+            
+            // Save model configuration
+            const configPath = path.join(weightsDir, 'config.json');
+            await this.writeFileAtomic(configPath, {
+                modelType: modelType,
+                config: model.getModelSummary().config,
+                architecture: model.getModelSummary().architecture,
+                timestamp: Date.now(),
+                version: '1.0.0'
+            });
+            
+            // 🆕 FIXED: Save metadata with timestamp at root level for verification
             const metadata = {
                 pair: pair.toUpperCase(),
                 modelType: modelType,
                 savedAt: Date.now(),
+                timestamp: Date.now(), // 🆕 ADDED: Required for verification
                 modelSummary: model.getModelSummary(),
+                weightsCount: weightsData.length,
                 version: '1.0.0',
                 type: 'model_weights'
             };
@@ -214,32 +249,36 @@ class MLStorage {
             this.weightsCache.set(cacheKey, {
                 hasWeights: true,
                 savedAt: Date.now(),
-                weightsDir: weightsDir
+                weightsDir: weightsDir,
+                weightsCount: weightsData.length
             });
             
-            console.log(`Model weights saved for ${pair}:${modelType}`, {
+            console.log(`✅ Model weights saved for ${pair}:${modelType}`, {
                 weightsDir: weightsDir,
+                weightsCount: weightsData.length,
                 modelParams: metadata.modelSummary.totalParams
             });
             
             return weightsDir;
             
         } catch (error) {
-            console.error(`Failed to save model weights for ${pair}:${modelType}`, { 
+            console.error(`❌ Failed to save model weights for ${pair}:${modelType}`, { 
                 error: error.message 
             });
             throw error;
         }
     }
     
+    // 🆕 FIXED: Load weights from JSON data and rebuild model
     async loadModelWeights(pair, modelType, ModelClass, config) {
         try {
             const weightsDir = path.join(this.weightsDir, `${pair.toLowerCase()}_${modelType}`);
-            const modelJsonPath = path.join(weightsDir, 'model.json');
+            const weightsPath = path.join(weightsDir, 'weights.json');
+            const configPath = path.join(weightsDir, 'config.json');
             const metadataPath = path.join(weightsDir, 'metadata.json');
             
             // Check if weights exist
-            if (!fs.existsSync(modelJsonPath) || !fs.existsSync(metadataPath)) {
+            if (!fs.existsSync(weightsPath) || !fs.existsSync(metadataPath)) {
                 console.log(`No trained weights found for ${pair}:${modelType}`);
                 return null;
             }
@@ -262,14 +301,32 @@ class MLStorage {
                 }
             }
             
-            // Load the model with weights
-            const tf = require('@tensorflow/tfjs');
-            const loadedModel = await tf.loadLayersModel(`file://${weightsDir}/model.json`);
+            // Load weights data
+            const weightsData = this.readFileSecure(weightsPath);
+            if (!weightsData || !weightsData.weights) {
+                console.warn(`Invalid weights data for ${pair}:${modelType}`);
+                return null;
+            }
             
-            // Create wrapper with correct class
+            // Create new model with same config
             const modelWrapper = new ModelClass(config);
-            modelWrapper.model = loadedModel;
-            modelWrapper.isCompiled = true;
+            modelWrapper.buildModel();
+            modelWrapper.compileModel();
+            
+            // 🆕 FIXED: Recreate tensors from saved data and set weights
+            const tf = require('@tensorflow/tfjs');
+            const weightTensors = [];
+            
+            for (const weightInfo of weightsData.weights) {
+                const tensor = tf.tensor(weightInfo.data, weightInfo.shape, weightInfo.dtype);
+                weightTensors.push(tensor);
+            }
+            
+            // Set the weights on the model
+            modelWrapper.model.setWeights(weightTensors);
+            
+            // Clean up weight tensors (model has its own copies now)
+            weightTensors.forEach(tensor => tensor.dispose());
             
             // Cache weights info
             const cacheKey = `${pair.toUpperCase()}_${modelType}`;
@@ -277,19 +334,21 @@ class MLStorage {
                 hasWeights: true,
                 loadedAt: Date.now(),
                 weightsDir: weightsDir,
-                metadata: metadata
+                metadata: metadata,
+                weightsCount: weightsData.weights.length
             });
             
-            console.log(`Model weights loaded for ${pair}:${modelType}`, {
+            console.log(`✅ Model weights loaded for ${pair}:${modelType}`, {
                 weightsDir: weightsDir,
                 savedAt: new Date(metadata.savedAt).toLocaleString(),
+                weightsCount: weightsData.weights.length,
                 modelParams: metadata.modelSummary.totalParams
             });
             
             return modelWrapper;
             
         } catch (error) {
-            console.error(`Failed to load model weights for ${pair}:${modelType}`, { 
+            console.error(`❌ Failed to load model weights for ${pair}:${modelType}`, { 
                 error: error.message 
             });
             return null;
@@ -306,10 +365,10 @@ class MLStorage {
         
         // Check filesystem
         const weightsDir = path.join(this.weightsDir, `${pair.toLowerCase()}_${modelType}`);
-        const modelJsonPath = path.join(weightsDir, 'model.json');
+        const weightsPath = path.join(weightsDir, 'weights.json');
         const metadataPath = path.join(weightsDir, 'metadata.json');
         
-        const hasWeights = fs.existsSync(modelJsonPath) && fs.existsSync(metadataPath);
+        const hasWeights = fs.existsSync(weightsPath) && fs.existsSync(metadataPath);
         
         // Cache result
         this.weightsCache.set(cacheKey, {
@@ -321,7 +380,7 @@ class MLStorage {
         return hasWeights;
     }
     
-    // NEW: Get list of all trained models
+    // Get list of all trained models
     getTrainedModelsList() {
         try {
             const trainedModels = [];
@@ -346,7 +405,8 @@ class MLStorage {
                                 savedAt: metadata.savedAt,
                                 modelParams: metadata.modelSummary?.totalParams || 0,
                                 featureCount: metadata.modelSummary?.config?.features || 0,
-                                weightsDir: dir
+                                weightsDir: dir,
+                                weightsCount: metadata.weightsCount || 0
                             });
                         }
                     } catch (error) {
