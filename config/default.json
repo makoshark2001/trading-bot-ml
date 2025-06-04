@@ -14,7 +14,7 @@
       "targetPeriods": [1, 3, 5]
     },
     "ensemble": {
-      "enabledModels": ["lstm", "gru", "cnn"],
+      "enabledModels": ["lstm", "gru", "cnn", "transformer"],
       "strategy": "weighted",
       "autoUpdateWeights": true,
       "minModelWeight": 0.1,
@@ -87,15 +87,15 @@
         "numHeads": 8,
         "numLayers": 4,
         "dff": 512,
-        "epochs": 100,
+        "epochs": 50,
         "batchSize": 16,
         "validationSplit": 0.2,
         "dropout": 0.1,
         "learningRate": 0.001,
         "usePositionalEncoding": true,
         "maxPositionalEncoding": 1000,
-        "patience": 20,
-        "warmupSteps": 4000,
+        "patience": 15,
+        "warmupSteps": 2000,
         "features": 52
       }
     },
