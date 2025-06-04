@@ -765,7 +765,7 @@ class MLServer {
             const model = await this.getOrCreateModel(pair, modelType, currentFeatureCount);
             
             // Get model-specific training config
-            const modelConfig = config.get(`ml.models.${modelType}`) || {};
+            const modelConfig = this.getModelConfig(modelType);
             const modelTrainingConfig = {
                 epochs: config.epochs || modelConfig.epochs || 25,
                 batchSize: config.batchSize || modelConfig.batchSize || 32,
@@ -826,6 +826,47 @@ class MLServer {
             Logger.error(`Queued training failed for ${pair}:${modelType}`, { error: error.message });
             throw error;
         }
+    }
+
+    // Get model configuration without using config.get
+    getModelConfig(modelType) {
+        const defaultConfigs = {
+            lstm: {
+                sequenceLength: 60,
+                units: 50,
+                layers: 2,
+                epochs: 50,
+                batchSize: 32,
+                dropout: 0.2,
+                learningRate: 0.001
+            },
+            gru: {
+                sequenceLength: 60,
+                units: 50,
+                layers: 2,
+                epochs: 40,
+                batchSize: 32,
+                dropout: 0.2,
+                learningRate: 0.001
+            },
+            cnn: {
+                sequenceLength: 60,
+                filters: [32, 64, 128],
+                epochs: 30,
+                batchSize: 32,
+                dropout: 0.3,
+                learningRate: 0.001
+            },
+            transformer: {
+                sequenceLength: 60,
+                epochs: 100,
+                batchSize: 16,
+                dropout: 0.1,
+                learningRate: 0.001
+            }
+        };
+        
+        return defaultConfigs[modelType] || defaultConfigs.lstm;
     }
     
     // FULL ENSEMBLE PREDICTION IMPLEMENTATION
@@ -1154,7 +1195,7 @@ class MLServer {
         };
         
         // Get model-specific config 
-        const modelSpecificConfig = config.get(`ml.models.${modelType}`) || {};
+        const modelSpecificConfig = this.getModelConfig(modelType);
         const finalConfig = {
             ...modelSpecificConfig,
             ...baseConfig
