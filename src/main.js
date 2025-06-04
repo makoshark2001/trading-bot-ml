@@ -111,19 +111,19 @@ setInterval(() => {
     }
 }, 300000); // Check every 5 minutes
 
-// Startup banner
+// Startup banner with consolidated storage info
 console.log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║                   🤖 TRADING BOT ML SERVICE                  ║
-║                  Enhanced Persistence Edition                ║
+║              4-Model Ensemble + Consolidated Storage         ║
 ╠══════════════════════════════════════════════════════════════╣
-║  🧠 LSTM Neural Networks     💾 Atomic File Writes          ║
-║  📊 52+ Feature Engineering  🔄 Training History Tracking   ║
-║  🔮 Real-time Predictions    📈 Prediction History Storage  ║
-║  ⚡ Feature Caching         🧹 Automatic Cleanup           ║
-║  🚀 High Performance        📊 Storage Analytics           ║
+║  🧠 LSTM + GRU + CNN + Transformer  💾 Consolidated Storage ║
+║  📊 84+ Feature Engineering         🔄 Training Queue Mgmt  ║
+║  🔮 Real-time Ensemble Predictions  📈 Atomic File Writes   ║
+║  ⚡ Intelligent Caching            🧹 Automatic Migration   ║
+║  🚀 Ultra-Fast Performance         📊 Enhanced Analytics    ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Port: 3001                  Version: 1.0.0                 ║
+║  Port: 3001                         Version: 2.0.0          ║
 ║  Node: ${process.version.padEnd(22)} Status: Starting...           ║
 ╚══════════════════════════════════════════════════════════════╝
 `);

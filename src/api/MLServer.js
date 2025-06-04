@@ -1202,7 +1202,7 @@ class MLServer {
             processedData.testY.dispose();
             
             // Save training history
-            await this.mlStorage.saveTrainingHistory(`${pair}_${modelType}`, trainingResults);
+            await this.mlStorage.saveTrainingHistory(pair, modelType, trainingResults);
             
             // Recreate ensemble if we have enough models
             await this.recreateEnsembleIfNeeded(pair);
@@ -1758,22 +1758,37 @@ class MLServer {
     
     async start() {
         try {
-            Logger.info('Starting ML Server with ENSEMBLE MODELS ENABLED...');
+            Logger.info('Starting ML Server with 4-MODEL ENSEMBLE + CONSOLIDATED STORAGE...');
+            
+            // Check if consolidation migration is needed
+            try {
+                const legacyExists = require('fs').existsSync(require('path').join(this.mlStorage.weightsDir, '.'));
+                if (legacyExists) {
+                    Logger.info('🔄 Legacy storage detected, starting migration...');
+                    const migrationResults = await this.mlStorage.migrateLegacyData();
+                    Logger.info('✅ Migration completed', migrationResults);
+                }
+            } catch (migrationError) {
+                Logger.warn('Migration check failed', { error: migrationError.message });
+            }
             
             // Wait for core service (not in quick mode anymore)
             await this.dataClient.waitForCoreService();
             
             // Start HTTP server
             this.server = this.app.listen(this.port, () => {
-                Logger.info(`Ensemble-enabled ML Server running at http://localhost:${this.port}`);
-                console.log(`🚀 ENSEMBLE ML API available at: http://localhost:${this.port}/api`);
+                Logger.info(`4-Model Ensemble ML Server with Consolidated Storage running at http://localhost:${this.port}`);
+                console.log(`🚀 4-MODEL ENSEMBLE ML API available at: http://localhost:${this.port}/api`);
                 console.log(`⚡ Health check: http://localhost:${this.port}/api/health`);
                 console.log(`🎯 Ensemble predictions: http://localhost:${this.port}/api/predictions/BTC`);
-                console.log(`🤖 Single model: http://localhost:${this.port}/api/predictions/BTC?model=lstm`);
+                console.log(`🤖 LSTM model: http://localhost:${this.port}/api/predictions/BTC?model=lstm`);
+                console.log(`🔄 GRU model: http://localhost:${this.port}/api/predictions/BTC?model=gru`);
+                console.log(`📊 CNN model: http://localhost:${this.port}/api/predictions/BTC?model=cnn`);
+                console.log(`🔮 Transformer model: http://localhost:${this.port}/api/predictions/BTC?model=transformer`);
                 console.log(`📊 Model status: http://localhost:${this.port}/api/models/BTC/status`);
                 console.log(`🔄 Training queue: http://localhost:${this.port}/api/training/queue`);
                 console.log('');
-                console.log('🤖 ENSEMBLE FEATURES ACTIVE:');
+                console.log('🤖 4-MODEL ENSEMBLE FEATURES ACTIVE:');
                 console.log(`   • Ensemble Mode: ${!this.quickMode ? 'ENABLED' : 'DISABLED'}`);
                 console.log(`   • Quick Mode: ${this.quickMode ? 'ENABLED' : 'DISABLED'}`);
                 console.log(`   • Enabled Models: ${this.enabledModels.join(', ')}`);
@@ -1781,12 +1796,14 @@ class MLServer {
                 console.log(`   • Cache Timeout: ${this.cacheTimeout}ms`);
                 console.log(`   • Max Concurrent Training: ${this.trainingQueue?.maxConcurrentTraining || 'Not Ready'}`);
                 console.log(`   • Training Cooldown: ${this.trainingQueue?.trainingCooldown ? (this.trainingQueue.trainingCooldown / 1000 / 60) + ' minutes' : 'Not Ready'}`);
+                console.log(`   • Consolidated Storage: ENABLED`);
                 console.log(`   • Intelligent Caching: ENABLED`);
                 console.log(`   • Training Queue: ${this.trainingQueue ? 'ACTIVE' : 'INITIALIZING'}`);
+                console.log(`   • Storage Type: Consolidated Pair-Based`);
             });
             
         } catch (error) {
-            Logger.error('Failed to start Ensemble ML server', { error: error.message });
+            Logger.error('Failed to start 4-Model Ensemble ML server', { error: error.message });
             process.exit(1);
         }
     }
