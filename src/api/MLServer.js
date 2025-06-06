@@ -1109,9 +1109,9 @@ class MLServer {
         });
     }
     
-    // 🔧 CRITICAL FIX: Updated training function to use new consolidated storage format
+    // Training function that will be called by the queue manager
     async performModelTraining(pair, modelType, config) {
-        Logger.info(`🔧 FIXED: Performing queued training for ${pair}:${modelType} with NEW STORAGE`, config);
+        Logger.info(`Performing queued training for ${pair}:${modelType}`, config);
         
         try {
             // Get historical data
@@ -1172,21 +1172,16 @@ class MLServer {
                 modelTrainingConfig
             );
             
-            // 🔧 CRITICAL FIX: Save model weights using NEW CONSOLIDATED STORAGE FORMAT
+            // Save model weights if training was successful
             if (history.finalMetrics && parseFloat(history.finalMetrics.finalAccuracy) > 0.5) {
                 try {
-                    Logger.info(`💾 Saving model weights using NEW consolidated storage for ${pair}:${modelType}`);
                     await this.mlStorage.saveModelWeights(pair, modelType, model);
-                    Logger.info(`✅ Model weights saved successfully using NEW storage for ${pair}:${modelType}`);
+                    Logger.info(`Model weights saved for ${pair}:${modelType}`);
                 } catch (saveError) {
-                    Logger.error(`❌ Failed to save model weights for ${pair}:${modelType}`, { 
-                        error: saveError.message,
-                        stack: saveError.stack 
+                    Logger.warn(`Failed to save model weights for ${pair}:${modelType}`, { 
+                        error: saveError.message 
                     });
-                    // Don't fail the training because of storage issues
                 }
-            } else {
-                Logger.warn(`⚠️ Training accuracy too low (${history.finalMetrics?.finalAccuracy}), not saving weights for ${pair}:${modelType}`);
             }
             
             const trainingResults = {
@@ -1196,8 +1191,7 @@ class MLServer {
                 finalMetrics: history.finalMetrics,
                 epochsCompleted: history.epochsCompleted || history.finalMetrics?.epochsCompleted || history.epoch?.length || 0,
                 featureCount: currentFeatureCount,
-                timestamp: Date.now(),
-                storageFormat: 'consolidated' // Mark as using new storage
+                timestamp: Date.now()
             };
             
             // Clean up tensors
@@ -1208,33 +1202,18 @@ class MLServer {
             processedData.testX.dispose();
             processedData.testY.dispose();
             
-            // 🔧 CRITICAL FIX: Save training history using NEW CONSOLIDATED FORMAT
-            try {
-                Logger.info(`💾 Saving training history using NEW consolidated storage for ${pair}:${modelType}`);
-                await this.mlStorage.saveTrainingHistory(pair, trainingResults);
-                Logger.info(`✅ Training history saved successfully for ${pair}:${modelType}`);
-            } catch (historyError) {
-                Logger.error(`❌ Failed to save training history for ${pair}:${modelType}`, { 
-                    error: historyError.message 
-                });
-            }
+            // Save training history
+            await this.mlStorage.saveTrainingHistory(pair, modelType, trainingResults);
             
             // Recreate ensemble if we have enough models
             await this.recreateEnsembleIfNeeded(pair);
             
-            Logger.info(`✅ FIXED: Queued training completed for ${pair}:${modelType} with NEW STORAGE`, {
-                finalMetrics: trainingResults.finalMetrics,
-                storageFormat: 'consolidated',
-                weightsSaved: history.finalMetrics && parseFloat(history.finalMetrics.finalAccuracy) > 0.5
-            });
+            Logger.info(`Queued training completed for ${pair}:${modelType}`, trainingResults.finalMetrics);
             
             return trainingResults;
             
         } catch (error) {
-            Logger.error(`❌ FIXED: Queued training failed for ${pair}:${modelType}`, { 
-                error: error.message,
-                stack: error.stack 
-            });
+            Logger.error(`Queued training failed for ${pair}:${modelType}`, { error: error.message });
             throw error;
         }
     }
@@ -1577,7 +1556,7 @@ class MLServer {
         return weights[modelType] || 1.0;
     }
     
-    // 🔧 CRITICAL FIX: Updated model creation to use NEW CONSOLIDATED STORAGE for loading
+    // Create individual model - enhanced for ensemble use with FIXED COMPILATION
     async getOrCreateModel(pair, modelType, featureCount) {
         if (!this.models[pair]) {
             this.models[pair] = {};
@@ -1617,13 +1596,12 @@ class MLServer {
             ...baseConfig
         };
         
-        // 🔧 CRITICAL FIX: Try to load pre-trained weights using NEW CONSOLIDATED STORAGE first
+        // Try to load pre-trained weights first
         let model;
         const ModelClass = this.getModelClass(modelType);
         
         if (this.mlStorage.hasTrainedWeights(pair, modelType)) {
             try {
-                Logger.info(`💾 Loading pre-trained weights using NEW consolidated storage for ${pair}:${modelType}`);
                 model = await this.mlStorage.loadModelWeights(pair, modelType, ModelClass, finalConfig);
                 if (model) {
                     // 🔧 CRITICAL FIX: Ensure loaded model is compiled
@@ -1632,26 +1610,23 @@ class MLServer {
                         model.compileModel();
                     }
                     
-                    Logger.info(`✅ Loaded pre-trained ${modelType} model for ${pair} using NEW storage`, {
+                    Logger.info(`Loaded pre-trained ${modelType} model for ${pair}`, {
                         featureCount,
                         params: model.model?.countParams?.() || 0,
-                        isCompiled: model.isCompiled,
-                        storageFormat: 'consolidated'
+                        isCompiled: model.isCompiled
                     });
                     model.features = featureCount;
                     this.models[pair][modelType] = model;
                     return model;
                 }
             } catch (loadError) {
-                Logger.warn(`Failed to load pre-trained weights for ${pair}:${modelType} from NEW storage`, {
-                    error: loadError.message,
-                    storageFormat: 'consolidated'
+                Logger.warn(`Failed to load pre-trained weights for ${pair}:${modelType}`, {
+                    error: loadError.message
                 });
             }
         }
         
         // Create new model if loading failed or no weights exist
-        Logger.info(`💾 Creating new ${modelType} model for ${pair} (will use NEW storage format)`);
         model = new ModelClass(finalConfig);
         model.buildModel();
         model.compileModel(); // 🔧 CRITICAL FIX: Always compile new models
@@ -1665,12 +1640,11 @@ class MLServer {
         
         this.models[pair][modelType] = model;
         
-        Logger.info(`✅ New ${modelType} model created for ${pair}`, {
+        Logger.info(`New ${modelType} model created for ${pair}`, {
             featureCount,
             params: model.model?.countParams?.() || 0,
             hasPretrainedWeights: false,
-            isCompiled: model.isCompiled,
-            storageFormat: 'consolidated'
+            isCompiled: model.isCompiled
         });
         
         return model;
@@ -1787,20 +1761,23 @@ class MLServer {
         try {
             Logger.info('Starting ML Server with 4-MODEL ENSEMBLE + CONSOLIDATED STORAGE...');
             
-            // 🔧 CRITICAL FIX: Check for migration and warn about new storage format
+            // Check if consolidation migration is needed
             try {
                 const fs = require('fs');
                 const path = require('path');
                 const legacyWeightsDir = path.join(this.mlStorage.weightsDir || path.join(this.mlStorage.baseDir, 'weights'));
                 
-                if (fs.existsSync(legacyWeightsDir)) {
-                    Logger.info('🔄 Legacy storage detected - NEW consolidated storage format will be used for all new training');
-                    Logger.info('📂 Old models will remain accessible, new training will use consolidated format');
+                if (fs.existsSync(legacyWeightsDir) && typeof this.mlStorage.migrateLegacyData === 'function') {
+                    Logger.info('🔄 Legacy storage detected, starting migration...');
+                    const migrationResults = await this.mlStorage.migrateLegacyData();
+                    Logger.info('✅ Migration completed', migrationResults);
+                } else if (fs.existsSync(legacyWeightsDir)) {
+                    Logger.info('⚠️ Legacy storage detected but migration not available');
                 } else {
-                    Logger.info('✅ Using NEW consolidated storage format for all model operations');
+                    Logger.info('✅ Using consolidated storage, no migration needed');
                 }
-            } catch (storageCheckError) {
-                Logger.warn('Storage format check failed', { error: storageCheckError.message });
+            } catch (migrationError) {
+                Logger.warn('Migration check failed', { error: migrationError.message });
             }
             
             // Wait for core service (not in quick mode anymore)
@@ -1808,7 +1785,7 @@ class MLServer {
             
             // Start HTTP server
             this.server = this.app.listen(this.port, () => {
-                Logger.info(`4-Model Ensemble ML Server with FIXED Consolidated Storage running at http://localhost:${this.port}`);
+                Logger.info(`4-Model Ensemble ML Server with Consolidated Storage running at http://localhost:${this.port}`);
                 console.log(`🚀 4-MODEL ENSEMBLE ML API available at: http://localhost:${this.port}/api`);
                 console.log(`⚡ Health check: http://localhost:${this.port}/api/health`);
                 console.log(`🎯 Ensemble predictions: http://localhost:${this.port}/api/predictions/BTC`);
@@ -1819,12 +1796,6 @@ class MLServer {
                 console.log(`📊 Model status: http://localhost:${this.port}/api/models/BTC/status`);
                 console.log(`🔄 Training queue: http://localhost:${this.port}/api/training/queue`);
                 console.log('');
-                console.log('🔧 TRAINING STORAGE MIGRATION FIXED:');
-                console.log(`   • New Training: CONSOLIDATED STORAGE FORMAT`);
-                console.log(`   • Weight Saving: FIXED (using MLStorage.saveModelWeights)`);
-                console.log(`   • Weight Loading: FIXED (using MLStorage.loadModelWeights)`);
-                console.log(`   • Storage Verification: ENABLED with detailed logging`);
-                console.log('');
                 console.log('🤖 4-MODEL ENSEMBLE FEATURES ACTIVE:');
                 console.log(`   • Ensemble Mode: ${!this.quickMode ? 'ENABLED' : 'DISABLED'}`);
                 console.log(`   • Quick Mode: ${this.quickMode ? 'ENABLED' : 'DISABLED'}`);
@@ -1833,10 +1804,10 @@ class MLServer {
                 console.log(`   • Cache Timeout: ${this.cacheTimeout}ms`);
                 console.log(`   • Max Concurrent Training: ${this.trainingQueue?.maxConcurrentTraining || 'Not Ready'}`);
                 console.log(`   • Training Cooldown: ${this.trainingQueue?.trainingCooldown ? (this.trainingQueue.trainingCooldown / 1000 / 60) + ' minutes' : 'Not Ready'}`);
-                console.log(`   • FIXED Storage Format: Consolidated Pair-Based`);
+                console.log(`   • Consolidated Storage: ENABLED`);
                 console.log(`   • Intelligent Caching: ENABLED`);
                 console.log(`   • Training Queue: ${this.trainingQueue ? 'ACTIVE' : 'INITIALIZING'}`);
-                console.log(`   • Storage Migration: FIXED and ACTIVE`);
+                console.log(`   • Storage Type: Consolidated Pair-Based`);
             });
             
         } catch (error) {
