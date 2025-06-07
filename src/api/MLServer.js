@@ -1059,41 +1059,54 @@ class MLServer {
     // Add these routes to the setupUtilityRoutes() method in MLServer.js
     // Add after the existing storage stats endpoint
 
-    // Storage migration endpoint
-    this.app.post("/api/storage/migrate", async (req, res) => {
-      try {
-        Logger.info(
-          "Starting storage migration to consolidated format via API"
-        );
-
-        if (typeof this.mlStorage.migrateFromOldFormat !== "function") {
-          return res.status(501).json({
-            error: "Migration not supported",
-            message:
-              "Migration functionality not available in current storage implementation",
-          });
-        }
-
-        const migrationResults = await this.mlStorage.migrateFromOldFormat();
-
-        Logger.info("Storage migration completed via API", migrationResults);
-
-        res.json({
-          message: "Storage migration completed",
-          results: migrationResults,
-          timestamp: Date.now(),
+    // REPLACE the existing POST /api/storage/migrate endpoint in MLServer.js with this:
+        
+        this.app.post('/api/storage/migrate', async (req, res) => {
+            try {
+                Logger.info('Starting storage migration to consolidated format via API');
+                
+                // Check for different migration method names
+                let migrationMethod = null;
+                if (typeof this.mlStorage.migrateLegacyData === 'function') {
+                    migrationMethod = 'migrateLegacyData';
+                } else if (typeof this.mlStorage.migrateFromOldFormat === 'function') {
+                    migrationMethod = 'migrateFromOldFormat';
+                } else {
+                    // List available methods for debugging
+                    const availableMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(this.mlStorage))
+                        .filter(name => typeof this.mlStorage[name] === 'function' && name.includes('migrat'));
+                    
+                    return res.status(501).json({
+                        error: 'Migration not supported',
+                        message: 'Migration functionality not available in current storage implementation',
+                        availableMigrationMethods: availableMethods,
+                        storageType: this.mlStorage.constructor.name,
+                        allMethods: Object.getOwnPropertyNames(Object.getPrototypeOf(this.mlStorage))
+                    });
+                }
+                
+                Logger.info(`Using migration method: ${migrationMethod}`);
+                const migrationResults = await this.mlStorage[migrationMethod]();
+                
+                Logger.info('Storage migration completed via API', migrationResults);
+                
+                res.json({
+                    message: 'Storage migration completed',
+                    method: migrationMethod,
+                    results: migrationResults,
+                    timestamp: Date.now()
+                });
+                
+            } catch (error) {
+                Logger.error('Storage migration failed via API', { error: error.message });
+                res.status(500).json({
+                    error: 'Migration failed',
+                    message: error.message,
+                    stack: error.stack,
+                    timestamp: Date.now()
+                });
+            }
         });
-      } catch (error) {
-        Logger.error("Storage migration failed via API", {
-          error: error.message,
-        });
-        res.status(500).json({
-          error: "Migration failed",
-          message: error.message,
-          timestamp: Date.now(),
-        });
-      }
-    });
 
     // Get detailed asset information
     this.app.get("/api/storage/asset/:pair", (req, res) => {
