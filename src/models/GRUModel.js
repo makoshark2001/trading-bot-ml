@@ -1,5 +1,38 @@
 const tf = require('@tensorflow/tfjs');
-require('@tensorflow/tfjs-backend-wasm');
+
+// Try to load the fastest available backend
+let backendLoaded = false;
+
+// Try WASM backend first (fast and reliable)
+try {
+  require('@tensorflow/tfjs-backend-wasm');
+  backendLoaded = true;
+  console.log('🚀 WASM backend available for GRU');
+} catch (error) {
+  console.log('⚠️ WASM backend not available for GRU');
+}
+
+// Fallback to Node.js backend
+if (!backendLoaded) {
+  try {
+    require('@tensorflow/tfjs-node');
+    backendLoaded = true;
+    console.log('🚀 Node.js backend available for GRU');
+  } catch (error) {
+    console.log('⚠️ Node.js backend not available for GRU');
+  }
+}
+
+// Final fallback to CPU backend
+if (!backendLoaded) {
+  try {
+    require('@tensorflow/tfjs-backend-cpu');
+    console.log('💻 Using CPU backend for GRU (slower)');
+  } catch (error) {
+    console.log('❌ No TensorFlow backend available for GRU!');
+  }
+}
+
 const { Logger } = require('../utils');
 
 class GRUModel {
@@ -28,30 +61,52 @@ class GRUModel {
     
     async initializeTensorFlow() {
         try {
-            // Set WASM backend for better performance
-            await tf.setBackend('wasm');
-            await tf.ready();
+            console.log('🔧 Initializing TensorFlow backend for GRU...');
             
-            Logger.info('TensorFlow.js initialized with WASM backend', {
-                backend: tf.getBackend(),
-                version: tf.version.tfjs,
-                modelType: 'GRU' // Change to GRU, CNN, or Transformer for other models
-            });
+            // Try backends in order of preference
+            const backends = ['wasm', 'tensorflow', 'cpu'];
+            let success = false;
+            
+            for (const backend of backends) {
+                try {
+                    await tf.setBackend(backend);
+                    await tf.ready();
+                    success = true;
+                    
+                    Logger.info(`TensorFlow.js initialized with ${backend} backend for GRU`, {
+                        backend: tf.getBackend(),
+                        version: tf.version.tfjs,
+                        modelType: 'GRU'
+                    });
+                    
+                    // Quick performance test
+                    const start = Date.now();
+                    const testTensor = tf.randomNormal([100, 100]);
+                    const result = tf.matMul(testTensor, testTensor);
+                    await result.data();
+                    const duration = Date.now() - start;
+                    
+                    console.log(`⚡ GRU backend performance test: ${duration}ms`);
+                    
+                    testTensor.dispose();
+                    result.dispose();
+                    
+                    break;
+                } catch (error) {
+                    console.log(`❌ ${backend} backend failed for GRU: ${error.message}`);
+                    continue;
+                }
+            }
+            
+            if (!success) {
+                throw new Error('All TensorFlow backends failed to initialize for GRU');
+            }
+            
         } catch (error) {
-            Logger.error('Failed to initialize TensorFlow.js with WASM backend', { 
+            Logger.error('Failed to initialize TensorFlow.js for GRU', { 
                 error: error.message 
             });
-            
-            // Fallback to CPU backend
-            try {
-                await tf.setBackend('cpu');
-                await tf.ready();
-                Logger.warn('Falling back to CPU backend');
-            } catch (fallbackError) {
-                Logger.error('All TensorFlow backends failed', { 
-                    error: fallbackError.message 
-                });
-            }
+            throw error;
         }
     }
     

@@ -1,4 +1,38 @@
 const tf = require('@tensorflow/tfjs');
+
+// Try to load the fastest available backend
+let backendLoaded = false;
+
+// Try Node.js backend first (most reliable for server environments)
+try {
+  require('@tensorflow/tfjs-node');
+  backendLoaded = true;
+  console.log('🚀 Node.js backend available for DataPreprocessor');
+} catch (error) {
+  console.log('⚠️ Node.js backend not available for DataPreprocessor');
+}
+
+// Try WASM backend as fallback
+if (!backendLoaded) {
+  try {
+    require('@tensorflow/tfjs-backend-wasm');
+    backendLoaded = true;
+    console.log('🚀 WASM backend available for DataPreprocessor');
+  } catch (error) {
+    console.log('⚠️ WASM backend not available for DataPreprocessor');
+  }
+}
+
+// Final fallback to CPU backend
+if (!backendLoaded) {
+  try {
+    require('@tensorflow/tfjs-backend-cpu');
+    console.log('💻 Using CPU backend for DataPreprocessor (slower)');
+  } catch (error) {
+    console.log('❌ No TensorFlow backend available for DataPreprocessor!');
+  }
+}
+
 const { Logger } = require('../utils');
 
 // Rest of the file remains the same...
@@ -16,6 +50,10 @@ class DataPreprocessor {
             max: null
         };
         
+        // Initialize TensorFlow backend
+        this.backendInitialized = false;
+        this.initializeTensorFlow();
+        
         Logger.info('DataPreprocessor initialized', {
             sequenceLength: this.sequenceLength,
             testSplit: this.testSplit,
@@ -23,8 +61,61 @@ class DataPreprocessor {
         });
     }
     
+    async initializeTensorFlow() {
+        if (this.backendInitialized) {
+            return;
+        }
+        
+        try {
+            console.log('🔧 Initializing TensorFlow backend for DataPreprocessor...');
+            
+            // Try backends in order of preference for server environments
+            const backends = ['tensorflow', 'wasm', 'cpu'];
+            let success = false;
+            
+            for (const backend of backends) {
+                try {
+                    await tf.setBackend(backend);
+                    await tf.ready();
+                    success = true;
+                    
+                    Logger.info(`TensorFlow.js initialized with ${backend} backend for DataPreprocessor`, {
+                        backend: tf.getBackend(),
+                        version: tf.version.tfjs
+                    });
+                    
+                    this.backendInitialized = true;
+                    break;
+                } catch (error) {
+                    console.log(`❌ ${backend} backend failed for DataPreprocessor: ${error.message}`);
+                    continue;
+                }
+            }
+            
+            if (!success) {
+                throw new Error('All TensorFlow backends failed to initialize for DataPreprocessor');
+            }
+            
+        } catch (error) {
+            Logger.error('Failed to initialize TensorFlow.js for DataPreprocessor', { 
+                error: error.message 
+            });
+            throw error;
+        }
+    }
+    
+    async ensureBackendReady() {
+        if (!this.backendInitialized) {
+            await this.initializeTensorFlow();
+        }
+        await tf.ready();
+    }
+    
     async prepareTrainingData(featuresArray, targets) {
         try {
+            // Ensure TensorFlow is ready before any operations
+            await this.ensureBackendReady();
+            
             Logger.info('Preparing training data', {
                 samples: featuresArray.length,
                 features: featuresArray[0]?.length || 0
@@ -151,6 +242,9 @@ class DataPreprocessor {
         }
         
         try {
+            // Ensure TensorFlow is ready
+            await this.ensureBackendReady();
+            
             Logger.debug('Preparing real-time data for prediction');
             
             // Take the last sequenceLength samples

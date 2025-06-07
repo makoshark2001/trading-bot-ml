@@ -1929,7 +1929,7 @@ class MLServer {
   getModelConfig(modelType) {
     const defaultConfigs = {
       lstm: {
-        sequenceLength: 60,
+        sequenceLength: 15,
         units: 50,
         layers: 2,
         epochs: 50,
@@ -1938,7 +1938,7 @@ class MLServer {
         learningRate: 0.001,
       },
       gru: {
-        sequenceLength: 60,
+        sequenceLength: 15,
         units: 50,
         layers: 2,
         epochs: 40,
@@ -1947,7 +1947,7 @@ class MLServer {
         learningRate: 0.001,
       },
       cnn: {
-        sequenceLength: 60,
+        sequenceLength: 15,
         filters: [32, 64, 128],
         epochs: 30,
         batchSize: 32,
@@ -1955,7 +1955,7 @@ class MLServer {
         learningRate: 0.001,
       },
       transformer: {
-        sequenceLength: 60,
+        sequenceLength: 15,
         epochs: 100,
         batchSize: 16,
         dropout: 0.1,
