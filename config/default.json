@@ -44,12 +44,15 @@
         "units": 50,
         "layers": 2,
         "epochs": 50,
+        "periodicEpochs": 8,
         "batchSize": 32,
         "validationSplit": 0.2,
         "dropout": 0.2,
         "recurrentDropout": 0.2,
         "learningRate": 0.001,
+        "periodicLearningRate": 0.002,
         "patience": 10,
+        "periodicPatience": 5,
         "features": 52
       },
       "gru": {
@@ -57,12 +60,15 @@
         "units": 50,
         "layers": 2,
         "epochs": 40,
+        "periodicEpochs": 6,
         "batchSize": 32,
         "validationSplit": 0.2,
         "dropout": 0.2,
         "recurrentDropout": 0.2,
         "learningRate": 0.001,
+        "periodicLearningRate": 0.002,
         "patience": 10,
+        "periodicPatience": 4,
         "features": 52
       },
       "cnn": {
@@ -72,12 +78,15 @@
         "poolSizes": [2, 2, 2],
         "denseUnits": [128, 64],
         "epochs": 30,
+        "periodicEpochs": 5,
         "batchSize": 32,
         "validationSplit": 0.2,
         "dropout": 0.3,
         "learningRate": 0.001,
+        "periodicLearningRate": 0.003,
         "l2Regularization": 0.001,
         "patience": 15,
+        "periodicPatience": 3,
         "learningRateDecay": 0.95,
         "features": 52
       },
@@ -88,14 +97,17 @@
         "numLayers": 4,
         "dff": 512,
         "epochs": 50,
+        "periodicEpochs": 6,
         "batchSize": 16,
         "validationSplit": 0.2,
         "dropout": 0.1,
         "learningRate": 0.001,
+        "periodicLearningRate": 0.002,
         "usePositionalEncoding": true,
         "maxPositionalEncoding": 1000,
         "patience": 15,
-        "warmupSteps": 2000,
+        "periodicPatience": 4,
+        "warmupSteps": 1000,
         "features": 52
       }
     },
@@ -103,7 +115,7 @@
       "autoTraining": true,
       "periodicTraining": true,
       "periodicInterval": 3600000,
-      "periodicEpochs": 15,
+      "periodicEpochs": 8,
       "retrainThreshold": 3600000,
       "interval": 86400000,
       "minDataAge": 43200000,
@@ -111,16 +123,28 @@
       "defaultBatchSize": 32,
       "maxConcurrent": 2,
       "autoTrainingConfig": {
-        "epochs": 25,
+        "epochs": 20,
         "batchSize": 32,
         "verbose": 0,
-        "description": "Reduced epochs for automatic training on first use"
+        "learningRate": 0.001,
+        "patience": 10,
+        "description": "Moderate epochs for automatic training on first use"
       },
       "periodicTrainingConfig": {
-        "epochs": 15,
+        "epochs": 8,
         "batchSize": 32,
         "verbose": 0,
-        "description": "Fast training for periodic updates"
+        "learningRate": 0.002,
+        "patience": 5,
+        "description": "Fast training for frequent periodic updates - optimized for hourly runs"
+      },
+      "manualTrainingConfig": {
+        "epochs": 50,
+        "batchSize": 32,
+        "verbose": 1,
+        "learningRate": 0.001,
+        "patience": 15,
+        "description": "Full training for manual requests - higher quality"
       },
       "quietHours": null,
       "earlyStopping": {
@@ -132,7 +156,7 @@
       "learningRateScheduler": {
         "enabled": true,
         "factor": 0.5,
-        "patience": 5,
+        "patience": 3,
         "minLr": 0.00001
       },
       "dataAugmentation": {
@@ -359,7 +383,7 @@
     },
     "training": {
       "autoTraining": true,
-      "periodicTraining": false,
+      "periodicTraining": true,
       "weightPersistence": true,
       "trainingQueue": true,
       "backgroundTraining": true

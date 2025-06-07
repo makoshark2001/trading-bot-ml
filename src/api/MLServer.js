@@ -58,14 +58,17 @@ class MLServer {
     this.periodicTrainingInitialized = false;
     this.periodicStartupTimer = null;
     
-    // 🔧 NEW: Periodic training configuration - RESTORED
+    // 🔧 NEW: Periodic training configuration - OPTIMIZED FOR FREQUENT RUNS
     this.periodicTrainingEnabled = config.get("ml.training.periodicTraining") !== false; // Default enabled
-    this.periodicTrainingInterval = config.get("ml.training.periodicInterval") || 7200000; // 2 hours default
+    this.periodicTrainingInterval = config.get("ml.training.periodicInterval") || 3600000; // 1 hour default (was 2 hours)
     this.periodicTrainingConfig = {
-      epochs: config.get("ml.training.periodicTrainingConfig.epochs") || 15,
+      epochs: config.get("ml.training.periodicTrainingConfig.epochs") || 10, // REDUCED from 15 to 10
       batchSize: config.get("ml.training.periodicTrainingConfig.batchSize") || 32,
       verbose: 0,
       priority: 8, // Lower priority than manual training (1-7)
+      learningRate: 0.002, // Slightly higher for faster convergence with fewer epochs
+      patience: 5, // Reduced early stopping patience for periodic training
+      description: "Fast periodic training - optimized for frequent updates"
     };
     this.periodicTrainingTimer = null;
 
@@ -365,7 +368,7 @@ class MLServer {
     const cycleStart = Date.now();
     const cycleId = `periodic_${cycleStart}`;
     
-    Logger.info("🔄 Starting SEQUENTIAL periodic training cycle", {
+    Logger.info("🔄 Starting RESILIENT periodic training cycle", {
       cycleId: cycleId,
       enabledModels: this.enabledModels,
       timestamp: new Date().toLocaleString(),
@@ -383,8 +386,9 @@ class MLServer {
         return;
       }
 
-      // 🔧 CRITICAL: Limit to 2 pairs max for periodic training to prevent overwhelming
-      const limitedPairs = activePairs.slice(0, 2);
+      // 🔧 ENHANCED: Process more pairs but with better management
+      const maxPairs = Math.min(activePairs.length, 4); // Increased from 2 to 4
+      const limitedPairs = activePairs.slice(0, maxPairs);
 
       Logger.info(
         `📊 Periodic training cycle for ${limitedPairs.length} pairs: ${limitedPairs.join(", ")}`,
@@ -394,42 +398,61 @@ class MLServer {
       let totalQueued = 0;
       let totalSkipped = 0;
       let totalFailed = 0;
+      let pairsProcessed = 0;
+      let modelsProcessed = 0;
       const results = [];
 
-      // 🔧 CRITICAL: Process pairs ONE BY ONE, not all at once
+      // 🔧 ENHANCED: Process pairs ONE BY ONE with better error handling
       for (const pair of limitedPairs) {
-        // 🔧 Check if manual training started during our cycle
-        const currentQueueStatus = this.trainingQueue.getQueueStatus();
-        const hasManualTraining = currentQueueStatus.active.jobs.some(job => job.source !== 'periodic');
+        // 🔧 ENHANCED: Check once per pair instead of per model
+        const initialQueueStatus = this.trainingQueue.getQueueStatus();
+        const hasManualTraining = initialQueueStatus.active.jobs.some(job => job.source !== 'periodic');
         
-        if (currentQueueStatus.active.count > 0 && hasManualTraining) {
-          Logger.warn("🚫 Manual training detected during periodic cycle, stopping periodic training", {
+        if (initialQueueStatus.active.count > 0 && hasManualTraining) {
+          Logger.warn("🚫 Manual training detected, skipping remaining pairs in periodic cycle", {
             cycleId: cycleId,
-            activeJobs: currentQueueStatus.active.jobs.map(j => `${j.pair}:${j.modelType} (${j.source})`),
+            pairBeingProcessed: pair,
+            pairsProcessed: pairsProcessed,
+            totalPairs: limitedPairs.length,
+            activeJobs: initialQueueStatus.active.jobs.map(j => `${j.pair}:${j.modelType} (${j.source})`),
           });
-          break;
+          break; // Only break when manual training is detected
         }
 
+        pairsProcessed++;
+        
         const pairResults = {
           pair: pair,
           models: {},
+          processedAt: Date.now()
         };
 
-        // 🔧 CRITICAL: Process models ONE BY ONE for each pair
+        let pairQueued = 0;
+        let pairSkipped = 0;
+        let pairFailed = 0;
+
+        // 🔧 ENHANCED: Process models ONE BY ONE for each pair with better error handling
         for (const modelType of this.enabledModels) {
           try {
-            // 🔧 Double-check if ANY manual training is active
-            const liveStatus = this.trainingQueue.getQueueStatus();
-            const hasManualJob = liveStatus.active.jobs.some(job => job.source !== 'periodic');
+            modelsProcessed++;
             
-            if (liveStatus.active.count > 0 && hasManualJob) {
-              Logger.warn(`🚫 Manual training detected, stopping periodic training at ${pair}:${modelType}`, {
+            // 🔧 ENHANCED: Quick check if queue capacity is available
+            const liveStatus = this.trainingQueue.getQueueStatus();
+            
+            // Allow a few more jobs in queue (increased from just checking active to checking total capacity)
+            const totalInProgress = liveStatus.active.count + liveStatus.queued.count;
+            if (totalInProgress >= 5) { // Max 5 jobs total in system at once
+              Logger.info(`🚫 Queue capacity reached (${totalInProgress}/5), skipping ${pair}:${modelType}`, {
                 cycleId: cycleId,
+                activeJobs: liveStatus.active.count,
+                queuedJobs: liveStatus.queued.count,
               });
+              pairSkipped++;
               totalSkipped++;
               pairResults.models[modelType] = {
                 status: "skipped",
-                reason: "Manual training priority",
+                reason: "Queue capacity reached",
+                queueCapacity: `${totalInProgress}/5`
               };
               continue;
             }
@@ -446,10 +469,12 @@ class MLServer {
                   cooldownRemaining: canTrain.cooldownRemainingMinutes,
                 }
               );
+              pairSkipped++;
               totalSkipped++;
               pairResults.models[modelType] = {
                 status: "skipped",
                 reason: canTrain.reason,
+                cooldownRemaining: canTrain.cooldownRemainingMinutes
               };
               continue;
             }
@@ -460,6 +485,8 @@ class MLServer {
               source: "periodic",
               periodicCycle: cycleStart,
               cycleId: cycleId,
+              pairIndex: pairsProcessed,
+              modelIndex: this.enabledModels.indexOf(modelType),
             };
 
             // Queue periodic training job
@@ -475,17 +502,22 @@ class MLServer {
               priority: periodicConfig.priority,
               source: "periodic",
               cycleId: cycleId,
+              pairProgress: `${pairsProcessed}/${limitedPairs.length}`,
+              modelProgress: `${this.enabledModels.indexOf(modelType) + 1}/${this.enabledModels.length}`
             });
+            
+            pairQueued++;
             totalQueued++;
             pairResults.models[modelType] = {
               status: "queued",
               jobId: jobId,
               source: "periodic",
               cycleId: cycleId,
+              priority: periodicConfig.priority
             };
 
-            // 🔧 CRITICAL: Wait a bit between model submissions to prevent queue flooding
-            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
+            // 🔧 ENHANCED: Shorter delay between model submissions
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Reduced from 2 seconds to 1 second
 
           } catch (error) {
             Logger.warn(
@@ -493,35 +525,61 @@ class MLServer {
               {
                 cycleId: cycleId,
                 error: error.message,
+                pairProgress: `${pairsProcessed}/${limitedPairs.length}`,
               }
             );
+            pairFailed++;
             totalFailed++;
             pairResults.models[modelType] = {
               status: "failed",
               error: error.message,
+              failedAt: Date.now()
             };
           }
         }
 
+        // Add pair summary to results
+        pairResults.summary = {
+          queued: pairQueued,
+          skipped: pairSkipped,
+          failed: pairFailed,
+          total: this.enabledModels.length
+        };
+        
         results.push(pairResults);
 
-        // 🔧 CRITICAL: Wait between pairs to prevent overwhelming the queue
-        await new Promise(resolve => setTimeout(resolve, 5000)); // 5 second delay between pairs
+        Logger.info(`📋 Pair ${pair} periodic training summary`, {
+          cycleId: cycleId,
+          queued: pairQueued,
+          skipped: pairSkipped,
+          failed: pairFailed,
+          total: this.enabledModels.length,
+          pairProgress: `${pairsProcessed}/${limitedPairs.length}`
+        });
+
+        // 🔧 ENHANCED: Shorter wait between pairs
+        if (pairsProcessed < limitedPairs.length) {
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Reduced from 5 seconds to 2 seconds
+        }
       }
 
       const cycleDuration = Date.now() - cycleStart;
       const nextCycle = new Date(Date.now() + this.periodicTrainingInterval);
 
-      Logger.info("🎯 Sequential periodic training cycle completed", {
+      Logger.info("🎯 RESILIENT periodic training cycle completed", {
         cycleId: cycleId,
         duration: Math.round(cycleDuration / 1000) + "s",
-        pairs: limitedPairs.length,
-        totalModelsAttempted: limitedPairs.length * this.enabledModels.length,
+        pairsAttempted: limitedPairs.length,
+        pairsProcessed: pairsProcessed,
+        modelsAttempted: limitedPairs.length * this.enabledModels.length,
+        modelsProcessed: modelsProcessed,
         totalQueued,
         totalSkipped,
         totalFailed,
+        successRate: `${totalQueued}/${modelsProcessed} (${Math.round((totalQueued / Math.max(modelsProcessed, 1)) * 100)}%)`,
         nextCycle: nextCycle.toLocaleString(),
         maxConcurrentTraining: this.trainingQueue.maxConcurrentTraining,
+        resultsDetailed: results.length <= 2 ? results : `${results.length} pairs processed`
       });
 
     } catch (error) {
@@ -538,6 +596,7 @@ class MLServer {
       Logger.debug("🔄 Periodic training flags reset", {
         periodicTrainingRunning: this.periodicTrainingRunning,
         isPeriodicTrainingActive: this.isPeriodicTrainingActive,
+        cycleId: cycleId
       });
     }
   }
@@ -1771,13 +1830,18 @@ class MLServer {
     });
   }
 
-  // Training function that will be called by the queue manager
+  // Training function that will be called by the queue manager - OPTIMIZED FOR PERIODIC/MANUAL
   async performModelTraining(pair, modelType, config) {
-    // 🔧 Enhanced logging to track training sources
-    Logger.info(`🚀 STARTING queued training for ${pair}:${modelType}`, {
+    // 🔧 Enhanced logging to track training sources and optimization
+    const trainingType = config.source === 'periodic' ? 'periodic' : 'manual';
+    const isPeriodicTraining = trainingType === 'periodic';
+    
+    Logger.info(`🚀 STARTING ${trainingType.toUpperCase()} training for ${pair}:${modelType}`, {
       source: config.source || "unknown",
+      trainingType: trainingType,
       priority: config.priority || "unknown",
       epochsRequested: config.epochs || "default",
+      isPeriodicTraining: isPeriodicTraining,
       periodicRunning: this.periodicTrainingRunning,
       periodicActive: this.isPeriodicTrainingActive,
       cycleId: config.cycleId || "unknown",
@@ -1831,24 +1895,31 @@ class MLServer {
         throw new Error(`Failed to compile ${modelType} model for ${pair}`);
       }
 
-      // Get model-specific training config
-      const modelConfig = this.getModelConfig(modelType);
+      // 🔧 ENHANCED: Get model-specific training config optimized for training type
+      const baseModelConfig = this.getModelConfig(modelType, trainingType);
+      
+      // 🔧 OPTIMIZED: Use different configs for periodic vs manual training
       const modelTrainingConfig = {
-        epochs: config.epochs || modelConfig.epochs || 25,
-        batchSize: config.batchSize || modelConfig.batchSize || 32,
-        verbose: 0, // Silent training
+        epochs: config.epochs || baseModelConfig.epochs,
+        batchSize: config.batchSize || baseModelConfig.batchSize,
+        learningRate: config.learningRate || baseModelConfig.learningRate,
+        patience: config.patience || baseModelConfig.patience,
+        verbose: 0, // Always silent for queue-managed training
+        trainingType: trainingType,
+        isOptimizedForFrequency: isPeriodicTraining,
         ...config,
       };
 
-      Logger.info(`Starting training for ${pair}:${modelType}`, {
+      Logger.info(`Starting ${trainingType} training for ${pair}:${modelType}`, {
         isCompiled: model.isCompiled,
         config: modelTrainingConfig,
         featureCount: currentFeatureCount,
         source: config.source,
         cycleId: config.cycleId,
+        trainingOptimization: isPeriodicTraining ? 'FREQUENT_UPDATES' : 'QUALITY_FOCUSED'
       });
 
-      // Perform training
+      // Perform training with optimized configuration
       const history = await model.train(
         processedData.trainX,
         processedData.trainY,
@@ -1857,19 +1928,29 @@ class MLServer {
         modelTrainingConfig
       );
 
-      // Save model weights if training was successful
-      if (
-        history.finalMetrics &&
-        parseFloat(history.finalMetrics.finalAccuracy) > 0.5
-      ) {
+      // 🔧 ENHANCED: Different saving criteria for periodic vs manual training
+      const shouldSaveWeights = isPeriodicTraining ? 
+        // For periodic: save if accuracy > 0.55 (lower threshold)
+        (history.finalMetrics && parseFloat(history.finalMetrics.finalAccuracy) > 0.55) :
+        // For manual: save if accuracy > 0.5 (original threshold)
+        (history.finalMetrics && parseFloat(history.finalMetrics.finalAccuracy) > 0.5);
+
+      if (shouldSaveWeights) {
         try {
           await this.mlStorage.saveModelWeights(pair, modelType, model);
-          Logger.info(`Model weights saved for ${pair}:${modelType}`);
+          Logger.info(`Model weights saved for ${pair}:${modelType} (${trainingType} training)`);
         } catch (saveError) {
           Logger.warn(`Failed to save model weights for ${pair}:${modelType}`, {
             error: saveError.message,
+            trainingType: trainingType
           });
         }
+      } else {
+        Logger.info(`Model weights not saved for ${pair}:${modelType} - accuracy too low`, {
+          accuracy: history.finalMetrics?.finalAccuracy,
+          threshold: isPeriodicTraining ? 0.55 : 0.5,
+          trainingType: trainingType
+        });
       }
 
       const trainingResults = {
@@ -1885,7 +1966,10 @@ class MLServer {
         featureCount: currentFeatureCount,
         timestamp: Date.now(),
         source: config.source,
+        trainingType: trainingType,
         cycleId: config.cycleId,
+        trainingDuration: Date.now() - (config.startTime || Date.now()),
+        optimizedFor: isPeriodicTraining ? 'frequency' : 'quality'
       };
 
       // Clean up tensors
@@ -1906,60 +1990,68 @@ class MLServer {
       await this.recreateEnsembleIfNeeded(pair);
 
       Logger.info(
-        `Queued training completed for ${pair}:${modelType}`,
+        `${trainingType.toUpperCase()} training completed for ${pair}:${modelType}`,
         {
           ...trainingResults.finalMetrics,
           source: config.source,
+          trainingType: trainingType,
           cycleId: config.cycleId,
+          epochsRun: trainingResults.epochsCompleted,
+          weightsSaved: shouldSaveWeights
         }
       );
 
       return trainingResults;
     } catch (error) {
-      Logger.error(`Queued training failed for ${pair}:${modelType}`, {
+      Logger.error(`${trainingType.toUpperCase()} training failed for ${pair}:${modelType}`, {
         error: error.message,
         source: config.source,
+        trainingType: trainingType,
         cycleId: config.cycleId,
       });
       throw error;
     }
   }
 
-  // Get model configuration without using config.get
-  getModelConfig(modelType) {
+  // Get model configuration with periodic vs manual training optimization
+  getModelConfig(modelType, trainingType = 'manual') {
     const defaultConfigs = {
       lstm: {
         sequenceLength: 15,
         units: 50,
         layers: 2,
-        epochs: 50,
+        epochs: trainingType === 'periodic' ? 8 : 50,
         batchSize: 32,
         dropout: 0.2,
-        learningRate: 0.001,
+        learningRate: trainingType === 'periodic' ? 0.002 : 0.001,
+        patience: trainingType === 'periodic' ? 5 : 10,
       },
       gru: {
         sequenceLength: 15,
         units: 50,
         layers: 2,
-        epochs: 40,
+        epochs: trainingType === 'periodic' ? 6 : 40,
         batchSize: 32,
         dropout: 0.2,
-        learningRate: 0.001,
+        learningRate: trainingType === 'periodic' ? 0.002 : 0.001,
+        patience: trainingType === 'periodic' ? 4 : 10,
       },
       cnn: {
         sequenceLength: 15,
         filters: [32, 64, 128],
-        epochs: 30,
+        epochs: trainingType === 'periodic' ? 5 : 30,
         batchSize: 32,
         dropout: 0.3,
-        learningRate: 0.001,
+        learningRate: trainingType === 'periodic' ? 0.003 : 0.001,
+        patience: trainingType === 'periodic' ? 3 : 15,
       },
       transformer: {
         sequenceLength: 15,
-        epochs: 100,
+        epochs: trainingType === 'periodic' ? 6 : 100,
         batchSize: 16,
         dropout: 0.1,
-        learningRate: 0.001,
+        learningRate: trainingType === 'periodic' ? 0.002 : 0.001,
+        patience: trainingType === 'periodic' ? 4 : 20,
       },
     };
 
