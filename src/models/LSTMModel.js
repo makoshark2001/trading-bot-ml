@@ -1,5 +1,38 @@
 const tf = require('@tensorflow/tfjs');
-require('@tensorflow/tfjs-backend-cpu');
+
+// Try to load the fastest available backend
+let backendLoaded = false;
+
+// Try WASM backend first (fast and reliable)
+try {
+  require('@tensorflow/tfjs-backend-wasm');
+  backendLoaded = true;
+  console.log('🚀 WASM backend available');
+} catch (error) {
+  console.log('⚠️ WASM backend not available');
+}
+
+// Fallback to Node.js backend
+if (!backendLoaded) {
+  try {
+    require('@tensorflow/tfjs-node');
+    backendLoaded = true;
+    console.log('🚀 Node.js backend available');
+  } catch (error) {
+    console.log('⚠️ Node.js backend not available');
+  }
+}
+
+// Final fallback to CPU backend
+if (!backendLoaded) {
+  try {
+    require('@tensorflow/tfjs-backend-cpu');
+    console.log('💻 Using CPU backend (slower)');
+  } catch (error) {
+    console.log('❌ No TensorFlow backend available!');
+  }
+}
+
 const { Logger } = require('../utils');
 
 class LSTMModel {
@@ -28,13 +61,52 @@ class LSTMModel {
     
     async initializeTensorFlow() {
         try {
-            await tf.ready();
-            Logger.info('TensorFlow.js initialized for LSTM', {
-                backend: tf.getBackend(),
-                version: tf.version.tfjs
-            });
+            console.log('🔧 Initializing TensorFlow backend for LSTM...');
+            
+            // Try backends in order of preference
+            const backends = ['wasm', 'tensorflow', 'cpu'];
+            let success = false;
+            
+            for (const backend of backends) {
+                try {
+                    await tf.setBackend(backend);
+                    await tf.ready();
+                    success = true;
+                    
+                    Logger.info(`TensorFlow.js initialized with ${backend} backend for LSTM`, {
+                        backend: tf.getBackend(),
+                        version: tf.version.tfjs,
+                        modelType: 'LSTM'
+                    });
+                    
+                    // Quick performance test
+                    const start = Date.now();
+                    const testTensor = tf.randomNormal([100, 100]);
+                    const result = tf.matMul(testTensor, testTensor);
+                    await result.data();
+                    const duration = Date.now() - start;
+                    
+                    console.log(`⚡ LSTM backend performance test: ${duration}ms`);
+                    
+                    testTensor.dispose();
+                    result.dispose();
+                    
+                    break;
+                } catch (error) {
+                    console.log(`❌ ${backend} backend failed for LSTM: ${error.message}`);
+                    continue;
+                }
+            }
+            
+            if (!success) {
+                throw new Error('All TensorFlow backends failed to initialize for LSTM');
+            }
+            
         } catch (error) {
-            Logger.error('Failed to initialize TensorFlow.js for LSTM', { error: error.message });
+            Logger.error('Failed to initialize TensorFlow.js for LSTM', { 
+                error: error.message 
+            });
+            throw error;
         }
     }
     

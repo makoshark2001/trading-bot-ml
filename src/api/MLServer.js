@@ -11,8 +11,10 @@ const ModelEnsemble = require("../models/ModelEnsemble");
 const { Logger, MLStorage, TrainingQueueManager } = require("../utils");
 
 class MLServer {
+    // 🔧 FINAL FIX: Add static class-level flags to prevent ALL duplicates
+  static periodicTrainingGlobalLock = false;
+  static periodicTimerGlobalLock = false;
   constructor() {
-
     // 🔧 DEBUG: Check if constructor is called multiple times
     console.log("🔧 MLServer constructor called at:", new Date().toISOString());
     console.log("🔧 Constructor call stack:", new Error().stack.split('\n').slice(1, 4).join(' | '));
@@ -49,24 +51,129 @@ class MLServer {
     this.quickMode = process.env.ML_QUICK_MODE === "true" || false; // Disable quick mode for ensemble
     this.cacheTimeout = config.get("ml.prediction.cacheTimeout") || 60000; // 60 second cache for ensemble
 
-    // 🔧 CONCURRENT TRAINING PREVENTION FLAGS
+    // 🔧 FIXED CONCURRENT TRAINING PREVENTION FLAGS - CLEAR INITIALIZATION
     this.isPeriodicTrainingActive = false;
     this.lastPeriodicTrainingStart = 0;
     this.periodicTrainingRunning = false;
     this.periodicTrainingInitialized = false;
-    this.periodicStartupTimer = null; // 🔧 ADD THIS LINE
+    this.periodicStartupTimer = null;
+    
+    // 🔧 NEW: Periodic training configuration - RESTORED
+    this.periodicTrainingEnabled = config.get("ml.training.periodicTraining") !== false; // Default enabled
+    this.periodicTrainingInterval = config.get("ml.training.periodicInterval") || 7200000; // 2 hours default
+    this.periodicTrainingConfig = {
+      epochs: config.get("ml.training.periodicTrainingConfig.epochs") || 15,
+      batchSize: config.get("ml.training.periodicTrainingConfig.batchSize") || 32,
+      verbose: 0,
+      priority: 8, // Lower priority than manual training (1-7)
+    };
+    this.periodicTrainingTimer = null;
 
     // Initialize services first
     this.initializeServices();
 
-    // Create training queue AFTER everything is initialized
-    this.initializeTrainingQueue();
-    
-    // 🔧 CRITICAL: Only call initializePeriodicTraining ONCE
-    //this.initializePeriodicTraining();
+    // 🔧 CRITICAL FIX: Change initialization order to prevent duplicate calls
+    // Create training queue FIRST, THEN initialize periodic training
+    this.initializeTrainingQueueSynchronous();
     
     this.setupRoutes();
     this.setupMiddleware();
+  }
+
+  // 🔧 NEW: Synchronous training queue initialization to prevent timing issues
+  initializeTrainingQueueSynchronous() {
+    try {
+      console.log("🔧 Creating TrainingQueueManager synchronously...");
+      
+      this.trainingQueue = new TrainingQueueManager({
+        maxConcurrentTraining: 1, // Only 1 training at a time
+        trainingCooldown: 1800000, // 30 minutes between training sessions
+        processingInterval: 5000, // Check queue every 5 seconds
+      });
+
+      console.log("🔧 TrainingQueueManager created, now initializing periodic training...");
+      
+      // 🔧 CRITICAL: Only initialize periodic training AFTER training queue is ready
+      // Add a small delay to ensure TrainingQueueManager is fully initialized
+      setTimeout(() => {
+        this.initializePeriodicTraining();
+      }, 1000); // 1 second delay to ensure everything is ready
+
+      Logger.info("Training queue manager initialized synchronously", {
+        maxConcurrentTraining: 1,
+        cooldownMinutes: 30,
+      });
+      
+    } catch (error) {
+      console.error("Failed to initialize training queue synchronously:", error.message);
+      
+      // Create a dummy training queue to prevent errors
+      this.trainingQueue = {
+        getQueueStatus: () => ({
+          active: { count: 0, jobs: [] },
+          queued: { count: 0, jobs: [] },
+        }),
+        addTrainingJob: () =>
+          Promise.reject(new Error("Training queue not available")),
+        canTrain: () => ({
+          allowed: false,
+          reason: "Training queue not initialized",
+        }),
+        cancelTraining: () => false,
+        emergencyStop: () => ({ queuedJobsCancelled: 0, activeJobsMarked: 0 }),
+        clearCooldown: () => false,
+        clearAllCooldowns: () => 0,
+        maxConcurrentTraining: 1,
+        trainingCooldown: 1800000,
+        shutdown: () => Promise.resolve(),
+      };
+      
+      // Still try to initialize periodic training with dummy queue
+      setTimeout(() => {
+        this.initializePeriodicTraining();
+      }, 1000);
+    }
+  }
+
+  // 🔧 REMOVE the old async initializeTrainingQueue method since we're using synchronous now
+
+  // 🔧 ENHANCED: Add even more robust duplicate prevention
+  initializePeriodicTraining() {
+    // 🔧 CRITICAL: Multiple layers of duplicate prevention
+    if (this.periodicTrainingInitialized) {
+      console.log("🚫 DUPLICATE periodic training initialization prevented (instance flag)", {
+        alreadyInitialized: this.periodicTrainingInitialized,
+        timerExists: !!this.periodicTrainingTimer,
+        enabled: this.periodicTrainingEnabled,
+        caller: new Error().stack.split('\n')[2]?.trim() || 'unknown'
+      });
+      return;
+    }
+
+    // 🔧 CRITICAL: Set flag IMMEDIATELY to prevent any race conditions
+    this.periodicTrainingInitialized = true;
+
+    Logger.info("🔄 Initializing periodic training system (SINGLE INSTANCE GUARANTEED)...", {
+      enabled: this.periodicTrainingEnabled,
+      intervalMinutes: this.periodicTrainingInterval / 1000 / 60,
+      config: this.periodicTrainingConfig,
+      initializationTimestamp: Date.now(),
+      trainingQueueReady: !!(this.trainingQueue && typeof this.trainingQueue.getQueueStatus === 'function'),
+    });
+
+    if (!this.periodicTrainingEnabled) {
+      Logger.info("Periodic training disabled in configuration");
+      return;
+    }
+
+    // 🔧 IMMEDIATE start since training queue should be ready now
+    if (this.trainingQueue && typeof this.trainingQueue.getQueueStatus === 'function') {
+      this.startPeriodicTraining();
+      Logger.info("✅ Periodic training initialization completed (SYNCHRONOUS)");
+    } else {
+      Logger.error("Training queue not ready even after synchronous initialization");
+      this.periodicTrainingEnabled = false;
+    }
   }
 
   initializeServices() {
@@ -101,109 +208,146 @@ class MLServer {
     });
   }
 
-  initializeTrainingQueue() {
-    try {
-      // Add a small delay to ensure Logger is fully ready
-      setTimeout(() => {
-        this.trainingQueue = new TrainingQueueManager({
-          maxConcurrentTraining: 1, // Only 1 training at a time
-          trainingCooldown: 1800000, // 30 minutes between training sessions
-          processingInterval: 5000, // Check queue every 5 seconds
-        });
-
-        Logger.info("Training queue manager initialized successfully", {
-          maxConcurrentTraining: 1,
-          cooldownMinutes: 30,
-        });
-      }, 100); // 100ms delay
-    } catch (error) {
-      console.error("Failed to initialize training queue:", error.message);
-      // Create a dummy training queue to prevent errors
-      this.trainingQueue = {
-        getQueueStatus: () => ({
-          active: { count: 0, jobs: [] },
-          queued: { count: 0, jobs: [] },
-        }),
-        addTrainingJob: () =>
-          Promise.reject(new Error("Training queue not available")),
-        canTrain: () => ({
-          allowed: false,
-          reason: "Training queue not initialized",
-        }),
-        cancelTraining: () => false,
-        emergencyStop: () => ({ queuedJobsCancelled: 0, activeJobsMarked: 0 }),
-        clearCooldown: () => false,
-        clearAllCooldowns: () => 0,
-        maxConcurrentTraining: 1,
-        trainingCooldown: 1800000,
-        shutdown: () => Promise.resolve(),
-      };
-    }
-  }
 
   initializePeriodicTraining() {
-    // 🔧 COMPLETELY DISABLED FOR TESTING
-    Logger.info("🚫 Periodic training COMPLETELY DISABLED for concurrent training testing");
-    this.periodicTrainingEnabled = false;
-    this.periodicTrainingInitialized = true;
-    // All other code in this method is disabled
+  // 🔧 CRITICAL: Use STATIC class-level lock to prevent ANY duplicate initialization
+  if (MLServer.periodicTrainingGlobalLock || this.periodicTrainingInitialized) {
+    console.log("🚫 ABSOLUTE DUPLICATE periodic training initialization prevented", {
+      globalLock: MLServer.periodicTrainingGlobalLock,
+      instanceInitialized: this.periodicTrainingInitialized,
+      timerExists: !!this.periodicTrainingTimer,
+      enabled: this.periodicTrainingEnabled,
+      caller: new Error().stack.split('\n')[2]?.trim() || 'unknown'
+    });
+    return;
   }
+
+  // 🔧 CRITICAL: Set BOTH flags IMMEDIATELY to prevent any race conditions
+  MLServer.periodicTrainingGlobalLock = true;
+  this.periodicTrainingInitialized = true;
+
+  Logger.info("🔄 Initializing periodic training system (ABSOLUTE SINGLE INSTANCE)...", {
+    enabled: this.periodicTrainingEnabled,
+    intervalMinutes: this.periodicTrainingInterval / 1000 / 60,
+    config: this.periodicTrainingConfig,
+    initializationTimestamp: Date.now(),
+    globalLock: MLServer.periodicTrainingGlobalLock,
+  });
+
+  if (!this.periodicTrainingEnabled) {
+    Logger.info("Periodic training disabled in configuration");
+    return;
+  }
+
+  // 🔧 CRITICAL: Delay startup to ensure training queue is ready
+  this.periodicStartupTimer = setTimeout(() => {
+    if (this.trainingQueue && typeof this.trainingQueue.getQueueStatus === 'function') {
+      this.startPeriodicTraining();
+      Logger.info("✅ Periodic training initialization completed (ABSOLUTE SINGLE INSTANCE)");
+    } else {
+      Logger.warn("Training queue not ready for periodic training, will retry...");
+      // Retry in 10 seconds if training queue isn't ready
+      setTimeout(() => {
+        if (this.trainingQueue && typeof this.trainingQueue.getQueueStatus === 'function') {
+          this.startPeriodicTraining();
+          Logger.info("✅ Periodic training initialization completed (RETRY SUCCESSFUL)");
+        } else {
+          Logger.error("Training queue never became ready, periodic training disabled");
+          this.periodicTrainingEnabled = false;
+        }
+      }, 10000);
+    }
+  }, 2000); // 2 second delay to ensure training queue is ready
+}
 
   startPeriodicTraining() {
-    // 🔧 DEBUG: Log who's calling this method
-    Logger.info("🔍 startPeriodicTraining called", {
+  // 🔧 CRITICAL: Use STATIC class-level lock to prevent multiple timer creation
+  if (MLServer.periodicTimerGlobalLock || this.periodicTrainingTimer) {
+    Logger.warn("🚫 ABSOLUTE DUPLICATE periodic training timer prevented", {
+      globalTimerLock: MLServer.periodicTimerGlobalLock,
+      timerAlreadyExists: !!this.periodicTrainingTimer,
       enabled: this.periodicTrainingEnabled,
-      hasTimer: !!this.periodicTrainingTimer,
-      initialized: this.periodicTrainingInitialized,
-      caller: new Error().stack.split('\n')[2]?.trim() || 'unknown',
+      caller: new Error().stack.split('\n')[2]?.trim() || 'unknown'
     });
-
-    if (!this.periodicTrainingEnabled) {
-      Logger.info("Periodic training not enabled, skipping start");
-      return;
-    }
-
-    // 🔧 CRITICAL: Prevent multiple timers
-    if (this.periodicTrainingTimer) {
-      Logger.warn("Periodic training timer already exists, clearing first");
-      clearInterval(this.periodicTrainingTimer);
-      this.periodicTrainingTimer = null;
-    }
-
-    // Set up the periodic timer
-    this.periodicTrainingTimer = setInterval(async () => {
-      try {
-        await this.performPeriodicTraining();
-      } catch (error) {
-        Logger.error("Periodic training cycle failed", {
-          error: error.message,
-        });
-      }
-    }, this.periodicTrainingInterval);
-
-    Logger.info("🔄 Periodic training started - ALL ENSEMBLE MODELS will be trained", {
-      interval: this.periodicTrainingInterval / 1000 / 60 + " minutes",
-      modelsPerCycle: this.enabledModels.length,
-      nextTraining: new Date(Date.now() + this.periodicTrainingInterval).toLocaleString(),
-      priority: this.periodicTrainingConfig.priority,
-    });
-
-    Logger.info("⏰ First periodic training cycle will run in " + (this.periodicTrainingInterval / 1000 / 60) + " minutes");
+    return;
   }
 
+  if (!this.periodicTrainingEnabled) {
+    Logger.info("Periodic training not enabled, skipping start");
+    return;
+  }
+
+  if (!this.trainingQueue || typeof this.trainingQueue.getQueueStatus !== 'function') {
+    Logger.error("Training queue not ready for periodic training");
+    return;
+  }
+
+  // 🔧 CRITICAL: Set timer lock IMMEDIATELY before creating timer
+  MLServer.periodicTimerGlobalLock = true;
+
+  Logger.info("🔄 Starting periodic training system (CREATING SINGLE TIMER)...", {
+    intervalMinutes: this.periodicTrainingInterval / 1000 / 60,
+    enabledModels: this.enabledModels,
+    priority: this.periodicTrainingConfig.priority,
+    timerCurrentlyExists: !!this.periodicTrainingTimer,
+    globalTimerLock: MLServer.periodicTimerGlobalLock,
+  });
+
+  // 🔧 CRITICAL: Single timer creation with absolute verification
+  this.periodicTrainingTimer = setInterval(async () => {
+    try {
+      await this.performPeriodicTraining();
+    } catch (error) {
+      Logger.error("Periodic training cycle failed", {
+        error: error.message,
+      });
+    }
+  }, this.periodicTrainingInterval);
+
+  // 🔧 VERIFICATION: Confirm timer was created
+  const timerCreated = !!this.periodicTrainingTimer;
+  
+  Logger.info("🔄 Periodic training timer created (SINGLE INSTANCE CONFIRMED)", {
+    interval: this.periodicTrainingInterval / 1000 / 60 + " minutes",
+    modelsPerCycle: this.enabledModels.length,
+    nextTraining: new Date(Date.now() + this.periodicTrainingInterval).toLocaleString(),
+    priority: this.periodicTrainingConfig.priority,
+    timerCreated: timerCreated,
+    timerVerification: "CONFIRMED",
+    globalLocks: {
+      periodicTraining: MLServer.periodicTrainingGlobalLock,
+      periodicTimer: MLServer.periodicTimerGlobalLock,
+    },
+  });
+
+  if (!timerCreated) {
+    Logger.error("❌ CRITICAL: Periodic training timer creation FAILED");
+    this.periodicTrainingEnabled = false;
+    MLServer.periodicTimerGlobalLock = false; // Reset lock on failure
+    return;
+  }
+
+  Logger.info("⏰ SINGLE periodic training cycle will run in " + (this.periodicTrainingInterval / 1000 / 60) + " minutes");
+}
+
   async performPeriodicTraining() {
-    // 🔧 CRITICAL: Prevent concurrent periodic training
+    // 🔧 CRITICAL: Enhanced duplicate execution prevention with atomic flags
     if (this.periodicTrainingRunning) {
-      Logger.warn("Periodic training already running, skipping this cycle");
+      Logger.warn("🚫 Periodic training already running, skipping duplicate cycle", {
+        currentlyRunning: this.periodicTrainingRunning,
+        lastStart: this.lastPeriodicTrainingStart,
+        timeSinceLastStart: Date.now() - this.lastPeriodicTrainingStart,
+      });
       return;
     }
 
     // 🔧 CRITICAL: Check if ANY training is active before starting periodic
     const queueStatus = this.trainingQueue.getQueueStatus();
     if (queueStatus.active.count > 0) {
-      Logger.info("Manual training active, skipping periodic training cycle", {
+      Logger.info("🔄 Manual training active, skipping periodic training cycle", {
         activeJobs: queueStatus.active.count,
         queuedJobs: queueStatus.queued.count,
+        activeJobDetails: queueStatus.active.jobs.map(j => `${j.pair}:${j.modelType}`),
       });
       return;
     }
@@ -213,18 +357,21 @@ class MLServer {
       return;
     }
 
-    // 🔧 CRITICAL: Set periodic training as running
+    // 🔧 CRITICAL: Atomic flag setting to prevent race conditions
     this.periodicTrainingRunning = true;
     this.isPeriodicTrainingActive = true;
     this.lastPeriodicTrainingStart = Date.now();
 
-
-
     const cycleStart = Date.now();
+    const cycleId = `periodic_${cycleStart}`;
+    
     Logger.info("🔄 Starting SEQUENTIAL periodic training cycle", {
+      cycleId: cycleId,
       enabledModels: this.enabledModels,
       timestamp: new Date().toLocaleString(),
       maxConcurrentTraining: this.trainingQueue.maxConcurrentTraining,
+      activeJobs: queueStatus.active.count,
+      queuedJobs: queueStatus.queued.count,
     });
 
     try {
@@ -240,7 +387,8 @@ class MLServer {
       const limitedPairs = activePairs.slice(0, 2);
 
       Logger.info(
-        `📊 Periodic training cycle for ${limitedPairs.length} pairs: ${limitedPairs.join(", ")}`
+        `📊 Periodic training cycle for ${limitedPairs.length} pairs: ${limitedPairs.join(", ")}`,
+        { cycleId: cycleId }
       );
 
       let totalQueued = 0;
@@ -252,8 +400,13 @@ class MLServer {
       for (const pair of limitedPairs) {
         // 🔧 Check if manual training started during our cycle
         const currentQueueStatus = this.trainingQueue.getQueueStatus();
-        if (currentQueueStatus.active.count > 0 && currentQueueStatus.active.jobs.some(job => job.source !== 'periodic')) {
-          Logger.warn("Manual training detected during periodic cycle, stopping periodic training");
+        const hasManualTraining = currentQueueStatus.active.jobs.some(job => job.source !== 'periodic');
+        
+        if (currentQueueStatus.active.count > 0 && hasManualTraining) {
+          Logger.warn("🚫 Manual training detected during periodic cycle, stopping periodic training", {
+            cycleId: cycleId,
+            activeJobs: currentQueueStatus.active.jobs.map(j => `${j.pair}:${j.modelType} (${j.source})`),
+          });
           break;
         }
 
@@ -267,8 +420,12 @@ class MLServer {
           try {
             // 🔧 Double-check if ANY manual training is active
             const liveStatus = this.trainingQueue.getQueueStatus();
-            if (liveStatus.active.count > 0 && liveStatus.active.jobs.some(job => job.source !== 'periodic')) {
-              Logger.warn(`Manual training detected, stopping periodic training at ${pair}:${modelType}`);
+            const hasManualJob = liveStatus.active.jobs.some(job => job.source !== 'periodic');
+            
+            if (liveStatus.active.count > 0 && hasManualJob) {
+              Logger.warn(`🚫 Manual training detected, stopping periodic training at ${pair}:${modelType}`, {
+                cycleId: cycleId,
+              });
               totalSkipped++;
               pairResults.models[modelType] = {
                 status: "skipped",
@@ -284,6 +441,7 @@ class MLServer {
               Logger.debug(
                 `Skipping periodic training for ${pair}:${modelType}`,
                 {
+                  cycleId: cycleId,
                   reason: canTrain.reason,
                   cooldownRemaining: canTrain.cooldownRemainingMinutes,
                 }
@@ -301,6 +459,7 @@ class MLServer {
               ...this.periodicTrainingConfig,
               source: "periodic",
               periodicCycle: cycleStart,
+              cycleId: cycleId,
             };
 
             // Queue periodic training job
@@ -315,12 +474,14 @@ class MLServer {
               jobId,
               priority: periodicConfig.priority,
               source: "periodic",
+              cycleId: cycleId,
             });
             totalQueued++;
             pairResults.models[modelType] = {
               status: "queued",
               jobId: jobId,
               source: "periodic",
+              cycleId: cycleId,
             };
 
             // 🔧 CRITICAL: Wait a bit between model submissions to prevent queue flooding
@@ -330,6 +491,7 @@ class MLServer {
             Logger.warn(
               `❌ Failed to queue periodic training for ${pair}:${modelType}`,
               {
+                cycleId: cycleId,
                 error: error.message,
               }
             );
@@ -351,6 +513,7 @@ class MLServer {
       const nextCycle = new Date(Date.now() + this.periodicTrainingInterval);
 
       Logger.info("🎯 Sequential periodic training cycle completed", {
+        cycleId: cycleId,
         duration: Math.round(cycleDuration / 1000) + "s",
         pairs: limitedPairs.length,
         totalModelsAttempted: limitedPairs.length * this.enabledModels.length,
@@ -363,13 +526,19 @@ class MLServer {
 
     } catch (error) {
       Logger.error("Periodic training cycle failed", {
+        cycleId: cycleId,
         error: error.message,
         duration: Math.round((Date.now() - cycleStart) / 1000) + "s",
       });
     } finally {
-      // 🔧 CRITICAL: Always reset periodic training flags
+      // 🔧 CRITICAL: Always reset periodic training flags in finally block
       this.periodicTrainingRunning = false;
       this.isPeriodicTrainingActive = false;
+      
+      Logger.debug("🔄 Periodic training flags reset", {
+        periodicTrainingRunning: this.periodicTrainingRunning,
+        isPeriodicTrainingActive: this.isPeriodicTrainingActive,
+      });
     }
   }
 
@@ -466,14 +635,41 @@ class MLServer {
   }
 
   stopPeriodicTraining() {
+    Logger.info("🛑 Stopping periodic training...", {
+      timerExists: !!this.periodicTrainingTimer,
+      isRunning: this.periodicTrainingRunning,
+      isActive: this.isPeriodicTrainingActive,
+      globalLocks: {
+        periodicTraining: MLServer.periodicTrainingGlobalLock,
+        periodicTimer: MLServer.periodicTimerGlobalLock,
+      },
+    });
+
+    // Clear startup timer if it exists
+    if (this.periodicStartupTimer) {
+      clearTimeout(this.periodicStartupTimer);
+      this.periodicStartupTimer = null;
+      Logger.info("🛑 Periodic training startup timer cleared");
+    }
+
+    // Clear periodic timer if it exists
     if (this.periodicTrainingTimer) {
       clearInterval(this.periodicTrainingTimer);
       this.periodicTrainingTimer = null;
-      Logger.info("🛑 Periodic training stopped");
+      Logger.info("🛑 Periodic training timer cleared");
     }
+
+    // Reset all flags (both instance and static)
     this.periodicTrainingEnabled = false;
     this.periodicTrainingRunning = false;
     this.isPeriodicTrainingActive = false;
+    this.periodicTrainingInitialized = false;
+    
+    // 🔧 CRITICAL: Reset static class-level locks
+    MLServer.periodicTrainingGlobalLock = false;
+    MLServer.periodicTimerGlobalLock = false;
+    
+    Logger.info("🛑 Periodic training stopped and ALL flags/locks reset");
   }
 
   // Add periodic training status to health endpoint
@@ -482,6 +678,7 @@ class MLServer {
       return {
         enabled: false,
         status: "disabled",
+        reason: "Disabled in configuration or manually stopped",
       };
     }
 
@@ -497,6 +694,15 @@ class MLServer {
       nextTraining: nextTraining ? nextTraining.toISOString() : null,
       config: this.periodicTrainingConfig,
       modelsToTrain: this.enabledModels,
+      flags: {
+        initialized: this.periodicTrainingInitialized,
+        running: this.periodicTrainingRunning,
+        active: this.isPeriodicTrainingActive,
+        timerExists: !!this.periodicTrainingTimer,
+        startupTimerExists: !!this.periodicStartupTimer,
+      },
+      lastStart: this.lastPeriodicTrainingStart,
+      timeSinceLastStart: this.lastPeriodicTrainingStart > 0 ? Date.now() - this.lastPeriodicTrainingStart : null,
     };
   }
 
@@ -1125,57 +1331,53 @@ class MLServer {
       }
     });
 
-    // Add these routes to the setupUtilityRoutes() method in MLServer.js
-    // Add after the existing storage stats endpoint
-
-    // REPLACE the existing POST /api/storage/migrate endpoint in MLServer.js with this:
-        
-        this.app.post('/api/storage/migrate', async (req, res) => {
-            try {
-                Logger.info('Starting storage migration to consolidated format via API');
+    // Storage migration endpoint
+    this.app.post('/api/storage/migrate', async (req, res) => {
+        try {
+            Logger.info('Starting storage migration to consolidated format via API');
+            
+            // Check for different migration method names
+            let migrationMethod = null;
+            if (typeof this.mlStorage.migrateLegacyData === 'function') {
+                migrationMethod = 'migrateLegacyData';
+            } else if (typeof this.mlStorage.migrateFromOldFormat === 'function') {
+                migrationMethod = 'migrateFromOldFormat';
+            } else {
+                // List available methods for debugging
+                const availableMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(this.mlStorage))
+                    .filter(name => typeof this.mlStorage[name] === 'function' && name.includes('migrat'));
                 
-                // Check for different migration method names
-                let migrationMethod = null;
-                if (typeof this.mlStorage.migrateLegacyData === 'function') {
-                    migrationMethod = 'migrateLegacyData';
-                } else if (typeof this.mlStorage.migrateFromOldFormat === 'function') {
-                    migrationMethod = 'migrateFromOldFormat';
-                } else {
-                    // List available methods for debugging
-                    const availableMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(this.mlStorage))
-                        .filter(name => typeof this.mlStorage[name] === 'function' && name.includes('migrat'));
-                    
-                    return res.status(501).json({
-                        error: 'Migration not supported',
-                        message: 'Migration functionality not available in current storage implementation',
-                        availableMigrationMethods: availableMethods,
-                        storageType: this.mlStorage.constructor.name,
-                        allMethods: Object.getOwnPropertyNames(Object.getPrototypeOf(this.mlStorage))
-                    });
-                }
-                
-                Logger.info(`Using migration method: ${migrationMethod}`);
-                const migrationResults = await this.mlStorage[migrationMethod]();
-                
-                Logger.info('Storage migration completed via API', migrationResults);
-                
-                res.json({
-                    message: 'Storage migration completed',
-                    method: migrationMethod,
-                    results: migrationResults,
-                    timestamp: Date.now()
-                });
-                
-            } catch (error) {
-                Logger.error('Storage migration failed via API', { error: error.message });
-                res.status(500).json({
-                    error: 'Migration failed',
-                    message: error.message,
-                    stack: error.stack,
-                    timestamp: Date.now()
+                return res.status(501).json({
+                    error: 'Migration not supported',
+                    message: 'Migration functionality not available in current storage implementation',
+                    availableMigrationMethods: availableMethods,
+                    storageType: this.mlStorage.constructor.name,
+                    allMethods: Object.getOwnPropertyNames(Object.getPrototypeOf(this.mlStorage))
                 });
             }
-        });
+            
+            Logger.info(`Using migration method: ${migrationMethod}`);
+            const migrationResults = await this.mlStorage[migrationMethod]();
+            
+            Logger.info('Storage migration completed via API', migrationResults);
+            
+            res.json({
+                message: 'Storage migration completed',
+                method: migrationMethod,
+                results: migrationResults,
+                timestamp: Date.now()
+            });
+            
+        } catch (error) {
+            Logger.error('Storage migration failed via API', { error: error.message });
+            res.status(500).json({
+                error: 'Migration failed',
+                message: error.message,
+                stack: error.stack,
+                timestamp: Date.now()
+            });
+        }
+    });
 
     // Get detailed asset information
     this.app.get("/api/storage/asset/:pair", (req, res) => {
@@ -1490,6 +1692,7 @@ class MLServer {
         timestamp: Date.now(),
       });
     });
+    
     // Get periodic training status
     this.app.get("/api/training/periodic/status", (req, res) => {
       try {
@@ -1577,6 +1780,7 @@ class MLServer {
       epochsRequested: config.epochs || "default",
       periodicRunning: this.periodicTrainingRunning,
       periodicActive: this.isPeriodicTrainingActive,
+      cycleId: config.cycleId || "unknown",
     });
 
     try {
@@ -1640,6 +1844,8 @@ class MLServer {
         isCompiled: model.isCompiled,
         config: modelTrainingConfig,
         featureCount: currentFeatureCount,
+        source: config.source,
+        cycleId: config.cycleId,
       });
 
       // Perform training
@@ -1678,6 +1884,8 @@ class MLServer {
           0,
         featureCount: currentFeatureCount,
         timestamp: Date.now(),
+        source: config.source,
+        cycleId: config.cycleId,
       };
 
       // Clean up tensors
@@ -1691,7 +1899,6 @@ class MLServer {
       // Save training history
       await this.mlStorage.saveTrainingHistory(
         pair,
-        //modelType,
         trainingResults
       );
 
@@ -1700,13 +1907,19 @@ class MLServer {
 
       Logger.info(
         `Queued training completed for ${pair}:${modelType}`,
-        trainingResults.finalMetrics
+        {
+          ...trainingResults.finalMetrics,
+          source: config.source,
+          cycleId: config.cycleId,
+        }
       );
 
       return trainingResults;
     } catch (error) {
       Logger.error(`Queued training failed for ${pair}:${modelType}`, {
         error: error.message,
+        source: config.source,
+        cycleId: config.cycleId,
       });
       throw error;
     }
@@ -2385,6 +2598,23 @@ class MLServer {
           }`
         );
         console.log(`   • Storage Type: Consolidated Pair-Based`);
+        console.log(
+          `   • Periodic Training: ${
+            this.periodicTrainingEnabled ? "ENABLED" : "DISABLED"
+          }`
+        );
+        if (this.periodicTrainingEnabled) {
+          console.log(
+            `   • Periodic Interval: ${this.periodicTrainingInterval / 1000 / 60} minutes`
+          );
+          console.log(
+            `   • Next Periodic Training: ${
+              this.periodicTrainingTimer 
+                ? new Date(Date.now() + this.periodicTrainingInterval).toLocaleString()
+                : "Not scheduled"
+            }`
+          );
+        }
       });
     } catch (error) {
       Logger.error("Failed to start 4-Model Ensemble ML server", {

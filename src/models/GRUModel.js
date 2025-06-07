@@ -1,5 +1,5 @@
 const tf = require('@tensorflow/tfjs');
-require('@tensorflow/tfjs-backend-cpu');
+require('@tensorflow/tfjs-backend-wasm');
 const { Logger } = require('../utils');
 
 class GRUModel {
@@ -28,13 +28,30 @@ class GRUModel {
     
     async initializeTensorFlow() {
         try {
+            // Set WASM backend for better performance
+            await tf.setBackend('wasm');
             await tf.ready();
-            Logger.info('TensorFlow.js initialized for GRU', {
+            
+            Logger.info('TensorFlow.js initialized with WASM backend', {
                 backend: tf.getBackend(),
-                version: tf.version.tfjs
+                version: tf.version.tfjs,
+                modelType: 'GRU' // Change to GRU, CNN, or Transformer for other models
             });
         } catch (error) {
-            Logger.error('Failed to initialize TensorFlow.js for GRU', { error: error.message });
+            Logger.error('Failed to initialize TensorFlow.js with WASM backend', { 
+                error: error.message 
+            });
+            
+            // Fallback to CPU backend
+            try {
+                await tf.setBackend('cpu');
+                await tf.ready();
+                Logger.warn('Falling back to CPU backend');
+            } catch (fallbackError) {
+                Logger.error('All TensorFlow backends failed', { 
+                    error: fallbackError.message 
+                });
+            }
         }
     }
     
