@@ -1615,7 +1615,7 @@ class MLServer {
       // Save training history
       await this.mlStorage.saveTrainingHistory(
         pair,
-        modelType,
+        //modelType,
         trainingResults
       );
 

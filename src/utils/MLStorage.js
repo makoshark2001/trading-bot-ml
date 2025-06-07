@@ -411,10 +411,12 @@ class MLStorage {
         }
     }
     
-    // CONSOLIDATED history management - NO separate files
+    // Fixed saveTrainingHistory method for MLStorage.js
+    // Replace the existing saveTrainingHistory method with this corrected version
+    
     async saveTrainingHistory(pair, trainingResults) {
         try {
-            console.log(`💾 Saving consolidated training history for ${pair}`);
+            console.log(`💾 Saving training history for ${pair}`);
             
             const assetData = this.loadAssetData(pair);
             
@@ -426,30 +428,45 @@ class MLStorage {
                 };
             }
             
+            // Fix the sessionId generation - ensure modelType is properly included
+            const modelType = trainingResults.modelType || 'unknown';
+            const timestamp = Date.now();
+            
             const trainingSession = {
                 ...trainingResults,
-                timestamp: Date.now(),
-                sessionId: `${pair}_${trainingResults.modelType}_${Date.now()}`,
-                storageType: 'PURE_CONSOLIDATED'
+                timestamp: timestamp,
+                sessionId: `${pair}_${modelType}_${timestamp}`,
+                // Ensure these fields are properly set
+                pair: pair.toUpperCase(),
+                modelType: modelType
             };
             
             assetData.training.history.push(trainingSession);
             assetData.training.lastTraining = trainingSession;
             assetData.training.totalTrainingSessions++;
             
+            // Keep only last 100 training sessions
             if (assetData.training.history.length > 100) {
                 assetData.training.history = assetData.training.history.slice(-100);
             }
             
+            // Update metadata
             assetData.metadata.totalTrainingHours += (trainingSession.duration || 0) / 1000 / 60 / 60;
+            assetData.metadata.lastTrainingSession = {
+                sessionId: trainingSession.sessionId,
+                modelType: modelType,
+                pair: pair.toUpperCase(),
+                timestamp: timestamp
+            };
             
-            // SAVE ONLY TO CONSOLIDATED FILE
             await this.saveAssetData(pair, assetData);
             
-            console.log(`✅ Consolidated training history saved for ${pair}:${trainingResults.modelType}`);
+            console.log(`✅ Training history saved for ${pair}:${modelType}`, {
+                sessionId: trainingSession.sessionId
+            });
             
         } catch (error) {
-            console.error(`❌ Failed to save consolidated training history for ${pair}:`, error.message);
+            console.error(`❌ Failed to save training history for ${pair}:`, error.message);
             throw error;
         }
     }
