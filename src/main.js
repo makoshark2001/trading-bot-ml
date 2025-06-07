@@ -9,6 +9,16 @@ async function main() {
         const server = new MLServer();
         global.tradingBotMLServer = server; // For graceful shutdown
         
+        // Check if server has start method
+        if (typeof server.start !== 'function') {
+            Logger.error('MLServer instance does not have start method', {
+                serverType: typeof server,
+                serverConstructor: server.constructor.name,
+                availableMethods: Object.getOwnPropertyNames(Object.getPrototypeOf(server))
+            });
+            throw new Error('MLServer.start method not found');
+        }
+        
         await server.start();
         
         Logger.info('✅ Advanced Trading Bot ML Service started successfully');
@@ -16,9 +26,11 @@ async function main() {
         
     } catch (error) {
         Logger.error('❌ Failed to start Advanced Trading Bot ML Service', { 
-            error: error.message 
+            error: error.message,
+            stack: error.stack
         });
         console.error('Fatal error:', error.message);
+        console.error('Stack trace:', error.stack);
         process.exit(1);
     }
 }
@@ -30,13 +42,19 @@ async function gracefulShutdown(signal) {
     
     if (global.tradingBotMLServer) {
         try {
-            // Stop the server which will trigger storage shutdown
-            await global.tradingBotMLServer.stop();
-            Logger.info('✅ ML service shutdown completed successfully');
-            console.log('💾 All ML data saved with atomic writes');
+            // Check if server has stop method
+            if (typeof global.tradingBotMLServer.stop === 'function') {
+                await global.tradingBotMLServer.stop();
+                Logger.info('✅ ML service shutdown completed successfully');
+                console.log('💾 All ML data saved with atomic writes');
+            } else {
+                Logger.warn('MLServer instance does not have stop method, forcing shutdown');
+                console.log('⚠️ Force shutdown - some data may not be saved');
+            }
         } catch (error) {
             Logger.error('❌ Error during graceful shutdown', { 
-                error: error.message 
+                error: error.message,
+                stack: error.stack
             });
             console.error('Shutdown error:', error.message);
         }
@@ -55,6 +73,7 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 // Handle uncaught exceptions with storage cleanup
 process.on('uncaughtException', async (error) => {
     console.error('\n💥 Uncaught Exception:', error.message);
+    console.error('Stack:', error.stack);
     Logger.error('Uncaught exception occurred', { 
         error: error.message,
         stack: error.stack 
@@ -64,8 +83,12 @@ process.on('uncaughtException', async (error) => {
     if (global.tradingBotMLServer) {
         try {
             console.log('🚨 Attempting emergency data save...');
-            await global.tradingBotMLServer.stop();
-            console.log('💾 Emergency save completed');
+            if (typeof global.tradingBotMLServer.stop === 'function') {
+                await global.tradingBotMLServer.stop();
+                console.log('💾 Emergency save completed');
+            } else {
+                console.log('⚠️ No stop method available for emergency save');
+            }
         } catch (saveError) {
             console.error('❌ Emergency save failed:', saveError.message);
         }
@@ -127,6 +150,29 @@ console.log(`
 ║  Node: ${process.version.padEnd(22)} Status: Starting...           ║
 ╚══════════════════════════════════════════════════════════════╝
 `);
+
+// Debug MLServer before starting
+console.log('🔧 Debugging MLServer import...');
+try {
+    console.log('MLServer type:', typeof MLServer);
+    console.log('MLServer constructor:', MLServer.name);
+    
+    const testServer = new MLServer();
+    console.log('Test server type:', typeof testServer);
+    console.log('Test server constructor:', testServer.constructor.name);
+    console.log('Available methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(testServer)).filter(name => typeof testServer[name] === 'function'));
+    console.log('Has start method:', typeof testServer.start === 'function');
+    
+    if (typeof testServer.start === 'function') {
+        console.log('✅ MLServer.start method confirmed');
+    } else {
+        console.error('❌ MLServer.start method missing');
+        console.error('Available methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(testServer)));
+    }
+} catch (debugError) {
+    console.error('❌ MLServer debug failed:', debugError.message);
+    console.error('Stack:', debugError.stack);
+}
 
 // Start the application
 main();
