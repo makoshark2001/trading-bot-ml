@@ -359,7 +359,7 @@
     },
     "training": {
       "autoTraining": true,
-      "periodicTraining": true,
+      "periodicTraining": false,
       "weightPersistence": true,
       "trainingQueue": true,
       "backgroundTraining": true

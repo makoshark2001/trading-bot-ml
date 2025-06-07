@@ -12,6 +12,11 @@ const { Logger, MLStorage, TrainingQueueManager } = require("../utils");
 
 class MLServer {
   constructor() {
+
+    // 🔧 DEBUG: Check if constructor is called multiple times
+    console.log("🔧 MLServer constructor called at:", new Date().toISOString());
+    console.log("🔧 Constructor call stack:", new Error().stack.split('\n').slice(1, 4).join(' | '));
+
     this.app = express();
     this.port = config.get("server.port") || 3001;
     this.startTime = Date.now();
@@ -44,19 +49,22 @@ class MLServer {
     this.quickMode = process.env.ML_QUICK_MODE === "true" || false; // Disable quick mode for ensemble
     this.cacheTimeout = config.get("ml.prediction.cacheTimeout") || 60000; // 60 second cache for ensemble
 
-    // 🔧 CONCURRENT TRAINING PREVENTION FLAGS - ADD THESE LINES
+    // 🔧 CONCURRENT TRAINING PREVENTION FLAGS
     this.isPeriodicTrainingActive = false;
     this.lastPeriodicTrainingStart = 0;
     this.periodicTrainingRunning = false;
-    this.periodicTrainingInitialized = false; // 🔧 ADD THIS LINE
-
+    this.periodicTrainingInitialized = false;
+    this.periodicStartupTimer = null; // 🔧 ADD THIS LINE
 
     // Initialize services first
     this.initializeServices();
 
     // Create training queue AFTER everything is initialized
     this.initializeTrainingQueue();
-    this.initializePeriodicTraining();
+    
+    // 🔧 CRITICAL: Only call initializePeriodicTraining ONCE
+    //this.initializePeriodicTraining();
+    
     this.setupRoutes();
     this.setupMiddleware();
   }
@@ -134,62 +142,11 @@ class MLServer {
   }
 
   initializePeriodicTraining() {
-    // 🔧 CRITICAL: Prevent double initialization
-    if (this.periodicTrainingInitialized) {
-      Logger.warn("Periodic training already initialized, skipping");
-      return;
-    }
-
-    try {
-      const periodicConfig = config.get("ml.training");
-
-      if (!periodicConfig.periodicTraining) {
-        Logger.info("Periodic training disabled in configuration");
-        this.periodicTrainingEnabled = false;
-        this.periodicTrainingInitialized = true; // 🔧 Mark as initialized
-        return;
-      }
-
-      this.periodicTrainingEnabled = true;
-      this.periodicTrainingInterval =
-        periodicConfig.periodicInterval || 3600000; // 1 hour default
-      this.periodicTrainingConfig = {
-        epochs: periodicConfig.periodicEpochs || 15,
-        batchSize: periodicConfig.periodicTrainingConfig?.batchSize || 32,
-        verbose: 0,
-        priority: 8, // 🔧 LOWER PRIORITY than manual training (1-7)
-        maxAttempts: 1,
-        source: "periodic",
-        ...periodicConfig.periodicTrainingConfig,
-      };
-
-      // 🔧 Mark as initialized BEFORE starting
-      this.periodicTrainingInitialized = true;
-
-      // Start periodic training after service is fully initialized
-      setTimeout(() => {
-        // 🔧 Double-check we haven't already started
-        if (!this.periodicTrainingTimer) {
-          this.startPeriodicTraining();
-        } else {
-          Logger.warn("Periodic training timer already exists during delayed start");
-        }
-      }, 60000); // 1 minute delay to ensure everything is ready
-
-      Logger.info("Periodic training initialized for ALL ENSEMBLE MODELS", {
-        enabled: this.periodicTrainingEnabled,
-        interval: this.periodicTrainingInterval / 1000 / 60 + " minutes",
-        modelsToTrain: this.enabledModels,
-        config: this.periodicTrainingConfig,
-        priority: this.periodicTrainingConfig.priority,
-      });
-    } catch (error) {
-      Logger.error("Failed to initialize periodic training", {
-        error: error.message,
-      });
-      this.periodicTrainingEnabled = false;
-      this.periodicTrainingInitialized = true; // 🔧 Mark as initialized even on error
-    }
+    // 🔧 COMPLETELY DISABLED FOR TESTING
+    Logger.info("🚫 Periodic training COMPLETELY DISABLED for concurrent training testing");
+    this.periodicTrainingEnabled = false;
+    this.periodicTrainingInitialized = true;
+    // All other code in this method is disabled
   }
 
   startPeriodicTraining() {
@@ -198,7 +155,7 @@ class MLServer {
       enabled: this.periodicTrainingEnabled,
       hasTimer: !!this.periodicTrainingTimer,
       initialized: this.periodicTrainingInitialized,
-      stack: new Error().stack.split('\n').slice(1, 4).join(' | '), // Show call stack
+      caller: new Error().stack.split('\n')[2]?.trim() || 'unknown',
     });
 
     if (!this.periodicTrainingEnabled) {
@@ -210,6 +167,7 @@ class MLServer {
     if (this.periodicTrainingTimer) {
       Logger.warn("Periodic training timer already exists, clearing first");
       clearInterval(this.periodicTrainingTimer);
+      this.periodicTrainingTimer = null;
     }
 
     // Set up the periodic timer
@@ -223,20 +181,14 @@ class MLServer {
       }
     }, this.periodicTrainingInterval);
 
-    Logger.info(
-      "🔄 Periodic training started - ALL ENSEMBLE MODELS will be trained",
-      {
-        interval: this.periodicTrainingInterval / 1000 / 60 + " minutes",
-        modelsPerCycle: this.enabledModels.length,
-        nextTraining: new Date(
-          Date.now() + this.periodicTrainingInterval
-        ).toLocaleString(),
-        priority: this.periodicTrainingConfig.priority,
-      }
-    );
+    Logger.info("🔄 Periodic training started - ALL ENSEMBLE MODELS will be trained", {
+      interval: this.periodicTrainingInterval / 1000 / 60 + " minutes",
+      modelsPerCycle: this.enabledModels.length,
+      nextTraining: new Date(Date.now() + this.periodicTrainingInterval).toLocaleString(),
+      priority: this.periodicTrainingConfig.priority,
+    });
 
-    Logger.info("⏰ First periodic training cycle will run in " + 
-      (this.periodicTrainingInterval / 1000 / 60) + " minutes");
+    Logger.info("⏰ First periodic training cycle will run in " + (this.periodicTrainingInterval / 1000 / 60) + " minutes");
   }
 
   async performPeriodicTraining() {
@@ -520,8 +472,8 @@ class MLServer {
       Logger.info("🛑 Periodic training stopped");
     }
     this.periodicTrainingEnabled = false;
-    this.periodicTrainingRunning = false;  // 🔧 Added
-    this.isPeriodicTrainingActive = false;  // 🔧 Added
+    this.periodicTrainingRunning = false;
+    this.isPeriodicTrainingActive = false;
   }
 
   // Add periodic training status to health endpoint
